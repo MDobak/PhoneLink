@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status bar icon: the two links of the app icon, drawn on a 24dp grid. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- Mac link. The cut in the top side lets the phone link go over it. -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="butt" android:strokeLineJoin="round"
+        android:pathData="M13,8 L19,8 A2,2 0 0 1 21,10 L21,14 A2,2 0 0 1 19,16 L9,16 A2,2 0 0 1 7,14 L7,10 A2,2 0 0 1 9,8"/>
+    <!-- Phone link. The cut in the right side lets the Mac link go over it. -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="butt" android:strokeLineJoin="round"
+        android:pathData="M11,18 A2,2 0 0 1 9,20 L5,20 A2,2 0 0 1 3,18 L3,6 A2,2 0 0 1 5,4 L9,4 A2,2 0 0 1 11,6 L11,14"/>
+</vector>

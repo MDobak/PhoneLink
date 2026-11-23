@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Phone Link</string>
+    <string name="a11y_label">Phone Link screen control</string>
+    <string name="a11y_description">Lets your paired Mac tap, swipe and type on this phone.</string>
+</resources>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground: two links. The phone link is portrait, the Mac link is landscape. The coordinates come from macos/tools/make-icon.swift (scale 0.084375 dp for each canvas unit). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Mac link. The cut in the top side lets the phone link go over it. -->
+    <path android:strokeWidth="5.231" android:strokeLineCap="butt" android:strokeLineJoin="round"
+        android:pathData="M56.953,44.803 L69.778,44.803 A5.147,5.147 0 0 1 74.925,49.95 L74.925,58.05 A5.147,5.147 0 0 1 69.778,63.197 L48.178,63.197 A5.147,5.147 0 0 1 43.031,58.05 L43.031,49.95 A5.147,5.147 0 0 1 48.178,44.803 L49.022,44.803">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:type="linear" android:startX="40.416" android:startY="42.188" android:endX="40.416" android:endY="65.813">
+                <item android:offset="0" android:color="#FFFFFFFF"/>
+                <item android:offset="1" android:color="#FFC9CEDB"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- Phone link. The cut in the right side lets the Mac link go over it. -->
+    <path android:strokeWidth="5.231" android:strokeLineCap="butt" android:strokeLineJoin="round"
+        android:pathData="M52.988,67.163 L52.988,69.019 A5.147,5.147 0 0 1 47.841,74.166 L38.222,74.166 A5.147,5.147 0 0 1 33.075,69.019 L33.075,38.981 A5.147,5.147 0 0 1 38.222,33.834 L47.841,33.834 A5.147,5.147 0 0 1 52.988,38.981 L52.988,59.231">
+        <aapt:attr name="android:strokeColor">
+            <gradient android:type="linear" android:startX="30.459" android:startY="31.219" android:endX="30.459" android:endY="76.781">
+                <item android:offset="0" android:color="#FF8467FF"/>
+                <item android:offset="0.5" android:color="#FFDE4BD6"/>
+                <item android:offset="1" android:color="#FFFF9254"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

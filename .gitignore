@@ -1,0 +1,16 @@
+.DS_Store
+.impeccable/
+.idea/
+docs/
+demo/
+
+# Android
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+
+# macOS
+macos/.build/
+macos/build/

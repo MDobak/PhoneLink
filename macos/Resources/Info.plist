@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>PhoneLink</string>
+    <key>CFBundleIdentifier</key><string>com.mdobak.phonelink</string>
+    <key>CFBundleName</key><string>Phone Link</string>
+    <key>CFBundleDisplayName</key><string>Phone Link</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSUIElement</key><true/>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSMicrophoneUsageDescription</key><string>Phone Link uses the microphone to send your voice into phone calls when call audio plays on this Mac.</string>
+    <key>NSLocalNetworkUsageDescription</key><string>Phone Link connects to your Android phone on the local network.</string>
+    <key>NSBonjourServices</key>
+    <array><string>_phonelink._tcp</string></array>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>com.mdobak.phonelink</string>
+            <key>CFBundleURLSchemes</key><array><string>phonelink</string></array>
+        </dict>
+    </array>
+    <key>NSUserActivityTypes</key>
+    <array><string>com.apple.corespotlightitem</string></array>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key><dict><key>default</key><string>Send to Phone</string></dict>
+            <key>NSMessage</key><string>sendToPhone</string>
+            <key>NSPortName</key><string>Phone Link</string>
+            <key>NSSendTypes</key><array><string>public.url</string><string>public.utf8-plain-text</string></array>
+            <key>NSRequiredContext</key><dict/>
+        </dict>
+    </array>
+</dict>
+</plist>

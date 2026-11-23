@@ -1,0 +1,14 @@
+<resources>
+    <!-- Material You roles from the wallpaper (Android 12+). -->
+    <color name="bg">@android:color/system_neutral1_50</color>
+    <color name="surface">@android:color/system_neutral1_0</color>
+    <color name="on_surface">@android:color/system_neutral1_900</color>
+    <color name="on_surface_variant">@android:color/system_neutral2_700</color>
+    <color name="outline">@android:color/system_neutral2_200</color>
+    <color name="primary">@android:color/system_accent1_600</color>
+    <color name="on_primary">@android:color/system_accent1_0</color>
+    <color name="primary_container">@android:color/system_accent1_100</color>
+    <color name="on_primary_container">@android:color/system_accent1_900</color>
+    <color name="ok">#FF1E8E3E</color>
+    <color name="error">#FFB3261E</color>
+</resources>

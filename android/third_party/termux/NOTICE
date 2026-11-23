@@ -1,0 +1,19 @@
+Phone Link includes source code from the Termux app:
+https://github.com/termux/termux-app (commit 8629e632fcb95da272221be327db653fb24befe9)
+
+Modules: terminal-emulator and terminal-view.
+Location in this project: app/src/main/java/com/termux/terminal and app/src/main/java/com/termux/view,
+and app/src/main/res/drawable/text_select_handle_*_material.xml.
+
+These modules are based on "Terminal Emulator for Android"
+(https://github.com/jackpal/Android-Terminal-Emulator) and are released under the
+Apache License, Version 2.0 (see LICENSE in this folder).
+Copyright (c) the Termux developers and the Android Terminal Emulator developers.
+
+Changes by Phone Link:
+- TerminalSession.java is replaced. It has no local process or JNI code. It sends input to the Mac and
+  receives the output of the Mac shell.
+- JNI.java and the native code (termux.c) are not included.
+- AndroidX annotations (@NonNull, @Nullable, @RequiresApi) are removed, so that the app has no dependencies.
+- The R class import in the text selection classes points to the app package.
+- The text selection toolbar has no "More" item.

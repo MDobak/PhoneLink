@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon background: a graphite tile with a soft violet glow. The coordinates come from macos/tools/make-icon.swift (scale 0.084375 dp for each canvas unit). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- The gradient fills the visible 72dp window. The end colors continue outside it. -->
+    <path android:pathData="M0,0H108V108H0z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear" android:startX="54" android:startY="18" android:endX="54" android:endY="90">
+                <item android:offset="0" android:color="#FF34363F"/>
+                <item android:offset="0.55" android:color="#FF1B1C22"/>
+                <item android:offset="1" android:color="#FF0E0F13"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:pathData="M0,0H108V108H0z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="radial" android:centerX="54" android:centerY="52.734" android:gradientRadius="37.44">
+                <item android:offset="0" android:color="#426A4DFF"/>
+                <item android:offset="1" android:color="#006A4DFF"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

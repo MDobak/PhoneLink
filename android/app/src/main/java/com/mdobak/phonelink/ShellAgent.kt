@@ -8,6 +8,7 @@ import android.net.LocalSocket
 import android.os.Binder
 import android.os.Looper
 import android.os.Parcel
+import android.os.SystemClock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
@@ -37,7 +38,7 @@ import kotlin.system.exitProcess
  * - Replies echo "rid". If a request has "id" and the reply does not, the reply gets it. mms.part and
  *   photos.thumb must use "rid" because their JSON uses "id" for data.
  * - Errors: {"t":<request type>,"error":<text>}.
- * - Pushes (no "rid"): clip, notif.posted, notif.removed, sms.new, ring.state.
+ * - Pushes (no "rid"): clip, clip.locked, notif.posted, notif.removed, sms.new, ring.state.
  */
 object ShellAgent {
     private var out: DataOutputStream? = null
@@ -117,7 +118,7 @@ object ShellAgent {
         )
         if (android.os.Build.VERSION.SDK_INT >= 30) types.add("photos.trash")
         return JSONObject().put("t", "caps").put("types", JSONArray(types))
-            .put("push", JSONArray(listOf("clip", "notif.posted", "notif.removed", "sms.new", "ring.state")))
+            .put("push", JSONArray(listOf("clip", "clip.locked", "notif.posted", "notif.removed", "sms.new", "ring.state")))
     }
 
     // Null means no reply. Multi-reply requests (photos) reply themselves.
@@ -170,6 +171,8 @@ object ShellAgent {
     }
 
     @Volatile private var lastClip: String? = null
+    /** When this helper last set the clipboard. Its own change also calls the listener. */
+    @Volatile private var ownClipAt = 0L
 
     private val clipboard: Any by lazy { Shell.asInterface("android.content.IClipboard", Shell.service("clipboard")) }
 
@@ -205,7 +208,13 @@ object ShellAgent {
 
     private fun readClip(initial: Boolean = false) {
         try {
-            val clip = Shell.call(clipboard, "getPrimaryClip") as ClipData? ?: return
+            val clip = Shell.call(clipboard, "getPrimaryClip") as ClipData?
+            if (clip == null) {
+                // Android gives no clipboard data while the phone is locked, also to the shell. The Mac then asks
+                // the Phone Link app for the selected text (InputService.recentSelection).
+                if (!initial && SystemClock.uptimeMillis() - ownClipAt > 1500) send(JSONObject().put("t", "clip.locked"))
+                return
+            }
             if (clip.itemCount == 0) return
             val text = clip.getItemAt(0).text?.toString() ?: return
             if (text == lastClip) return
@@ -216,6 +225,7 @@ object ShellAgent {
 
     private fun setClip(text: String) {
         lastClip = text
+        ownClipAt = SystemClock.uptimeMillis()
         Shell.call(clipboard, "setPrimaryClip", ClipData.newPlainText("Phone Link", text))
     }
 

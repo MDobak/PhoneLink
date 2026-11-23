@@ -429,6 +429,12 @@ final class AdbAgent: ObservableObject {
                       NSPasteboard.general.string(forType: .string) != text else { return }
                 ClipboardSync.shared.received(["t": "clip", "text": text])
             }
+        case "clip.locked":
+            // The phone is locked, so the helper could not read the new clipboard. The app can send the selected text.
+            DispatchQueue.main.async {
+                guard UserDefaults.standard.bool(forKey: "shareClipboard") else { return }
+                PhoneLink.shared.requestSelectionForClipboard()
+            }
         default:
             DispatchQueue.main.async { self.onPush?(j) }
         }

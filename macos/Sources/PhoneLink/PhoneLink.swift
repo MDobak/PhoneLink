@@ -689,6 +689,12 @@ final class PhoneLink: ObservableObject {
         }
     }
 
+    /// The app replies with "clip" when its accessibility service saw selected text a moment ago.
+    func requestSelectionForClipboard() {
+        if PhoneFeature.owner(of: "clip")?.isOff == true { return }
+        queue.async { if self.tx != nil { self.sendToApp(["t": "clip.selection"]) } }
+    }
+
     /// Call on queue.
     private func sendToApp(_ j: JSON) {
         guard let tx = self.tx, let c = self.conn,

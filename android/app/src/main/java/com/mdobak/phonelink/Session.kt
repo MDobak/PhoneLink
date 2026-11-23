@@ -333,6 +333,8 @@ class Session(private val svc: LinkService, private val socket: Socket) {
             "calls.log" -> bg(type) { send(Calls.log(svc, m.optInt("limit", 100))) }
 
             "clip" -> Clip.apply(svc, m)
+            // The phone is locked, so the shell helper could not read a new clipboard (ShellAgent.readClip).
+            "clip.selection" -> InputService.instance?.recentSelection()?.let { send(json("t" to "clip", "text" to it)) }
             "url.open" -> svc.openUrl(m.getString("url"))
             "ring" -> Ringer.start(svc)
             "ring.stop" -> Ringer.stop(svc)

@@ -25,7 +25,9 @@ class InputService : AccessibilityService() {
     override fun onServiceConnected() { instance = this; Hub.changed() }
     override fun onUnbind(intent: android.content.Intent?): Boolean { instance = null; Hub.changed(); return super.onUnbind(intent) }
     override fun onDestroy() { if (instance === this) instance = null; super.onDestroy() }
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event?.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) selectionChanged(event)
+    }
     override fun onInterrupt() {}
 
     @Suppress("DEPRECATION")
@@ -203,6 +205,49 @@ class InputService : AccessibilityService() {
             else -> return
         }
         performGlobalAction(a)
+    }
+
+    // The last selected text, kept only in memory. While the phone is locked, Android gives no clipboard data to any
+    // app or to the shell, so a copy in an app window reaches the Mac as this text (Session "clip.selection").
+
+    private val selLock = Any()
+    private var selText: String? = null
+    private var selActive = false
+    /** Uptime when the selection was last not empty. */
+    private var selSeen = 0L
+
+    private fun selectionChanged(e: AccessibilityEvent) {
+        var text: CharSequence? = e.text.firstOrNull()
+        var s = e.fromIndex
+        var end = e.toIndex
+        var password = e.isPassword
+        if (text == null || s < 0 || end < 0) {
+            val n = e.source
+            text = n?.text
+            s = n?.textSelectionStart ?: -1
+            end = n?.textSelectionEnd ?: -1
+            password = password || n?.isPassword == true
+        }
+        val a = minOf(s, end)
+        val b = maxOf(s, end)
+        val now = SystemClock.uptimeMillis()
+        synchronized(selLock) {
+            if (!password && text != null && a >= 0 && b > a && b <= text.length) {
+                selText = text.subSequence(a, b).toString()
+                selActive = true
+                selSeen = now
+            } else {
+                // A copy often clears the selection, so keep the text for a short time.
+                if (selActive) selSeen = now
+                selActive = false
+                if (password) selText = null
+            }
+        }
+    }
+
+    /** The selected text, or the text that was selected in the last few seconds. */
+    fun recentSelection(maxAgeMs: Long = 5000): String? = synchronized(selLock) {
+        selText?.takeIf { selActive || SystemClock.uptimeMillis() - selSeen <= maxAgeMs }
     }
 
     private fun focusedInput(): AccessibilityNodeInfo? =

@@ -2,8 +2,13 @@ package com.mdobak.phonelink
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.net.ConnectivityManager
+import android.os.Build
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
@@ -27,6 +32,11 @@ class MainActivity : UiActivity() {
         }
     }
 
+    /** The hotspot and Wi-Fi state change the connection rows. */
+    private val networkReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) { content.post { render() } }
+    }
+
     private val runtimePerms = arrayOf(
         Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS,
         Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE, Manifest.permission.READ_PHONE_STATE,
@@ -42,6 +52,10 @@ class MainActivity : UiActivity() {
     override fun onResume() {
         super.onResume()
         Hub.addListener(refresh)
+        @Suppress("DEPRECATION")
+        val filter = IntentFilter(Hotspot.STATE_ACTION).apply { addAction(ConnectivityManager.CONNECTIVITY_ACTION) }
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(networkReceiver, filter, RECEIVER_NOT_EXPORTED)
+        else registerReceiver(networkReceiver, filter)
         // Permissions may have been granted here or in system settings: start the observers that need them.
         Hub.service?.observePhone()
         render()
@@ -50,6 +64,7 @@ class MainActivity : UiActivity() {
 
     override fun onPause() {
         Hub.removeListener(refresh)
+        try { unregisterReceiver(networkReceiver) } catch (_: IllegalArgumentException) {}
         content.removeCallbacks(tick)
         super.onPause()
     }
@@ -92,15 +107,41 @@ class MainActivity : UiActivity() {
 
         val conn = section(null)
         val ip = ipAddress()
+        val hotspotOn = Hotspot.isOn(this)
+        val viaPrivate = s?.viaHotspot == true && PrivateWifi.isOn
+        val viaHotspot = s?.viaHotspot == true && !viaPrivate
         conn.addView(row(
             R.drawable.ic_laptop,
             if (s != null) s.macName else "Not connected",
-            if (s != null) "Connected"
-            else if (ip != null) "Open Phone Link on your Mac. IP address: $ip"
-            else "Connect to Wi-Fi, or connect to your Mac with USB.",
+            when {
+                viaPrivate -> "Connected through a private Wi-Fi network"
+                viaHotspot -> "Connected through ${Hotspot.term}"
+                s?.kind == LinkKind.USB -> "Connected with the USB cable"
+                s?.kind == LinkKind.BLUETOOTH -> "Connected with Bluetooth"
+                s != null -> "Connected"
+                hotspotOn -> "${Hotspot.term} is on. Connect your Mac to it, and Phone Link connects."
+                ip != null -> "Open Phone Link on your Mac. IP address: $ip"
+                else -> "Connect the USB cable, connect to Wi-Fi, or turn on ${Hotspot.term} for your Mac."
+            },
             null,
         ))
-        if (s != null) {
+        // Away from a shared Wi-Fi network, the Mac can join the hotspot. The app cannot turn it on, so open its settings.
+        if (s == null || viaHotspot) {
+            conn.addView(divider())
+            conn.addView(row(
+                R.drawable.ic_hotspot,
+                Hotspot.term,
+                when {
+                    viaHotspot && Hotspot.uplink(this) == "cellular" -> "On · Your Mac uses mobile data"
+                    viaHotspot -> "On · Your Mac is connected"
+                    hotspotOn -> "On"
+                    else -> "Use it when your Mac and phone are not on the same Wi-Fi"
+                },
+                textButton(if (hotspotOn) "Settings" else "Turn on") { Hotspot.openSettings(this) },
+            ))
+        }
+        // Bluetooth is too slow for files and Remote Desktop.
+        if (s != null && s.kind != LinkKind.BLUETOOTH) {
             conn.addView(divider())
             conn.addView(row(R.drawable.ic_folder, "Files on ${s.macName}", null, null) {
                 startActivity(Intent(this, MacFilesActivity::class.java))
@@ -139,6 +180,12 @@ class MainActivity : UiActivity() {
         access.addView(row(R.drawable.ic_volume, "Screen sound", "Hear the phone on your Mac during screen sharing",
             check(has(Manifest.permission.RECORD_AUDIO), "Allow") { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 3) }))
         access.addView(divider())
+        access.addView(row(R.drawable.ic_bluetooth, "Bluetooth", "Stay connected without Wi-Fi or a cable",
+            check(Bluetooth.allowed(this), "Allow") { requestPermissions(Bluetooth.permissions, 4) }))
+        access.addView(divider())
+        access.addView(row(R.drawable.ic_hotspot, "Private Wi-Fi network", "Your Mac can ask for a fast connection with no internet sharing",
+            check(PrivateWifi.allowed(this), "Allow") { requestPermissions(arrayOf(PrivateWifi.permission), 5) }))
+        access.addView(divider())
         access.addView(row(R.drawable.ic_battery, "Background use", "Stay connected when the screen is off",
             check(LinkService.ignoringBatteryOptimizations(this), "Allow") { startActivity(LinkService.batteryIntent(this)) }))
 
@@ -154,10 +201,12 @@ class MainActivity : UiActivity() {
         if (Hub.isPairing()) {
             val left = ((Hub.pairingUntil - System.currentTimeMillis()) / 1000).coerceAtLeast(0)
             macs.addView(row(R.drawable.ic_add, "Ready to pair", "Select this phone on your Mac · %d:%02d".format(left / 60, left % 60),
-                textButton("Cancel") { Hub.pairingUntil = 0; render() }))
+                textButton("Cancel") { Hub.pairingUntil = 0; Hub.service?.pairingChanged(); render() }))
         } else {
             macs.addView(row(R.drawable.ic_add, "Pair a new Mac", null, null, titleColorId = R.color.primary) {
                 Hub.pairingUntil = System.currentTimeMillis() + 120_000
+                // Macs find the phone with Bonjour and Bluetooth only while pairing is open.
+                Hub.service?.pairingChanged()
                 render()
                 content.removeCallbacks(tick)
                 content.postDelayed(tick, 1000)

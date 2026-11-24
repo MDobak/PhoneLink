@@ -31,7 +31,7 @@ if xcrun --find appintentsmetadataprocessor >/dev/null 2>&1; then
   SDK=$(xcrun --show-sdk-path)
   mkdir -p "$META"
   printf '%s' '["AppIntent","EntityQuery","AppEntity","TransientEntity","AppEnum","AppShortcutProviding","AppShortcutsProvider","AnyResolverProviding","AppIntentsPackage","DynamicOptionsProvider","EntityStringQuery","EntityPropertyQuery"]' > "$META/protocols.json"
-  swiftc -module-name PhoneLink -parse-as-library -wmo -c Sources/PhoneLink/*.swift -target arm64-apple-macos14.0 -sdk "$SDK" \
+  swiftc -module-name PhoneLink -parse-as-library -wmo -c Sources/PhoneLink/*.swift -I Sources/CPhoneUSB/include -target arm64-apple-macos14.0 -sdk "$SDK" \
     -emit-const-values-path "$META/PhoneLink.swiftconstvalues" -Xfrontend -const-gather-protocols-file -Xfrontend "$META/protocols.json" \
     -o "$META/PhoneLink.o" 2>/dev/null
   ls "$PWD"/Sources/PhoneLink/*.swift > "$META/sources.txt"

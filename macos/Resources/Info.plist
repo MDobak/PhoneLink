@@ -16,6 +16,7 @@
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>Phone Link uses the microphone to send your voice into phone calls when call audio plays on this Mac.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key><string>Phone Link connects to your Android phone with Bluetooth when Wi-Fi and the USB cable are not available.</string>
     <key>NSLocalNetworkUsageDescription</key><string>Phone Link connects to your Android phone on the local network.</string>
     <key>NSBonjourServices</key>
     <array><string>_phonelink._tcp</string></array>

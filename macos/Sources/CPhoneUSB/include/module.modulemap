@@ -1,0 +1,4 @@
+module CPhoneUSB {
+    header "CPhoneUSB.h"
+    export *
+}

@@ -204,6 +204,10 @@ private struct PhoneLinkCommands: Commands {
                     .disabled(agent.sharingStarts)
                 if on, agent.hotspotName != nil { Button("Connect This Mac to Hotspot") { HotspotControl.join() } }
             }
+            if link.isPaired, !connected {
+                Divider()
+                Button("Connect Through \(PhoneHotspot.term)…") { PhoneHotspot.shared.showSheet() }
+            }
         }
     }
 }

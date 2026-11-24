@@ -7,9 +7,14 @@ struct DebugSettings: View {
     @ObservedObject private var features = PhoneFeatures.shared
     @ObservedObject private var agent = AdbAgent.shared
     @ObservedObject private var callAudio = CallAudio.shared
+    @ObservedObject private var hotspot = PhoneHotspot.shared
     @AppStorage("adbAutoConnect") private var autoConnect = true
     @AppStorage("autoWirelessDebugging") private var autoWireless = true
     @AppStorage(CallAudio.mutePhoneMicKey) private var mutePhoneMic = false
+    @AppStorage(Aoa.settingKey) private var useCable = true
+    @AppStorage(Ble.settingKey) private var useBluetooth = true
+    @AppStorage(PrivateWifi.settingKey) private var autoPrivateWifi = false
+    @ObservedObject private var privateWifi = PrivateWifi.shared
     @State private var sheet: Sheet?
     @State private var wifiBusy = false
     @State private var wifiError: String?
@@ -29,6 +34,8 @@ struct DebugSettings: View {
                 debuggingSection
                 wirelessSection
             }
+            appConnectionSection
+            hotspotSection
             advancedSection
         }
         .formStyle(.grouped)
@@ -115,14 +122,6 @@ struct DebugSettings: View {
                     Label(d.displayModel, systemImage: d.usb ? "cable.connector" : "wifi")
                 }
             }
-            if link.isPaired, !appOnly {
-                LabeledContent {
-                    Button("Connect") { link.connectUSB() }
-                } label: {
-                    Text("Connect the app with USB")
-                    Text("Use the USB cable when there is no Wi-Fi.")
-                }
-            }
         } header: {
             Text("USB and Wireless Debugging")
         }
@@ -207,6 +206,132 @@ struct DebugSettings: View {
             }
         } header: {
             Text("Wireless Debugging")
+        }
+    }
+
+    // MARK: App connection
+
+    @ViewBuilder private var appConnectionSection: some View {
+        if link.isPaired {
+            Section {
+                ConnectionRow(symbol: "cable.connector", title: "USB Cable", state: cableState)
+                ConnectionRow(symbol: "wifi", title: "Wi-Fi", state: wifiState)
+                if link.viaHotspot, !link.usesPrivateWifi {
+                    ConnectionRow(symbol: "personalhotspot", title: PhoneHotspot.term, state: .inUse(nil))
+                }
+                ConnectionRow(symbol: "lock.shield", title: "Private Wi-Fi", state: privateWifiState) {
+                    if privateWifi.isActive {
+                        Button("Stop") { privateWifi.stop() }
+                    } else if privateWifi.canStart {
+                        Button("Use") { privateWifi.userStart() }
+                    }
+                }
+                ConnectionRow(symbol: "dot.radiowaves.left.and.right", title: "Bluetooth", state: bluetoothState)
+                if !appOnly {
+                    ConnectionRow(symbol: "terminal", title: "USB and Wireless Debugging", state: shellState)
+                }
+                if link.linkKind == .bluetooth, link.state == .connected {
+                    Text("On Bluetooth, screen sharing, Remote Desktop, app windows, Files and Photos need USB or Wireless debugging. Or use Private Wi-Fi.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Connections")
+            } footer: {
+                Text("The Phone Link app uses the USB cable first, then Wi-Fi or \(PhoneHotspot.term), then Bluetooth. It changes to a faster connection when the phone is not busy.")
+                    .settingsFooter()
+            }
+            Section {
+                Toggle(isOn: $useCable) {
+                    Text("Connect through the USB cable")
+                    Text("With USB debugging on, Phone Link uses adb. Else it uses USB accessory mode, and the Mac cannot open the phone storage over USB.")
+                }
+                .onChange(of: useCable) { _, on in link.usbSettingChanged(on) }
+                Toggle(isOn: $useBluetooth) {
+                    Text("Connect through Bluetooth")
+                    Text("When Wi-Fi and the USB cable are not available. Messages, calls, notifications and the clipboard work. Screen sharing, Files and Photos do not.")
+                }
+                .onChange(of: useBluetooth) { _, on in link.bluetoothSettingChanged(on) }
+                Toggle(isOn: $autoPrivateWifi) {
+                    Text("Create a private Wi-Fi network when needed")
+                    Text("On Bluetooth, when this Mac is not on a Wi-Fi network, the phone makes a network for this Mac only. It does not share mobile data. It stops after 5 minutes without screen sharing or file transfers.")
+                }
+                .onChange(of: autoPrivateWifi) { _, on in privateWifi.settingChanged(on) }
+            } header: {
+                Text("Phone Link App")
+            }
+        }
+    }
+
+    private var connected: Bool { link.state == .connected }
+
+    private var cableState: ConnectionState {
+        if connected, link.linkKind == .adb { return .inUse("USB debugging") }
+        if connected, link.linkKind == .usb { return .inUse("USB accessory") }
+        if !useCable { return .off }
+        return link.cableAvailable ? .available : .missing("Not connected")
+    }
+
+    private var wifiState: ConnectionState {
+        if connected, link.linkKind == .wifi, !link.viaHotspot { return .inUse(nil) }
+        return link.discovered.isEmpty ? .missing("Not found") : .available
+    }
+
+    private var privateWifiState: ConnectionState {
+        switch privateWifi.phase {
+        case .active: return .inUse(nil)
+        case .starting, .joining: return .busy("Starting…")
+        case .failed(let m): return .missing(m)
+        case .idle:
+            if link.linkKind == .bluetooth, connected { return .available }
+            return .missing(autoPrivateWifi ? "When Phone Link uses Bluetooth" : "Off")
+        }
+    }
+
+    private var bluetoothState: ConnectionState {
+        if connected, link.linkKind == .bluetooth { return .inUse(nil) }
+        if !useBluetooth { return .off }
+        return link.bluetoothNear ? .available : .missing("Not found")
+    }
+
+    private var shellState: ConnectionState {
+        if let t = link.shellTitle { return .inUse(t == "USB Debugging" ? "USB cable" : "Wi-Fi") }
+        return .missing("Not connected")
+    }
+
+    // MARK: Hotspot
+
+    @ViewBuilder private var hotspotSection: some View {
+        if link.isPaired {
+            let term = PhoneHotspot.term
+            Section {
+                if link.viaHotspot, !link.usesPrivateWifi {
+                    StatusRow(symbol: "personalhotspot", tint: .green, title: "Connected through \(term)",
+                              detail: link.phoneUplink == "cellular" ? "Your Mac uses the mobile data of the phone."
+                                  : link.phoneUplink == "wifi" ? "The phone shares its Wi-Fi connection with your Mac."
+                                  : "Your Mac uses the internet connection of the phone.")
+                }
+                LabeledContent {
+                    if hotspot.network != nil { Button("Forget") { hotspot.forget() } }
+                } label: {
+                    Text("Hotspot network")
+                    Text(hotspot.network.map { "“\($0.ssid)” is saved." }
+                         ?? "Not saved yet. Phone Link saves it when the phone connects with USB or Wireless debugging.")
+                }
+                if !link.viaHotspot {
+                    LabeledContent {
+                        Button("Connect…") { hotspot.showSheet() }
+                    } label: {
+                        Text("Connect through \(term)")
+                        Text("For places where your Mac and phone are not on the same Wi-Fi network.")
+                    }
+                }
+            } header: {
+                Text("Phone Hotspot")
+            } footer: {
+                Text("Phone Link finds the phone on its hotspot automatically. Your Mac uses the internet connection of the phone while it is on the hotspot.")
+                    .settingsFooter()
+            }
         }
     }
 
@@ -542,5 +667,56 @@ extension PhoneFeatures {
             }
         }
         PhoneLink.shared.featureChoicesChanged()
+    }
+}
+
+/// One connection in Settings > Connections, with its state.
+enum ConnectionState: Equatable {
+    case inUse(String?)
+    case available
+    case busy(String)
+    case missing(String)
+    case off
+}
+
+struct ConnectionRow<Accessory: View>: View {
+    let symbol: String
+    let title: String
+    let state: ConnectionState
+    @ViewBuilder var accessory: () -> Accessory
+
+    var body: some View {
+        LabeledContent {
+            HStack(spacing: 8) {
+                if case .busy = state { ProgressView().controlSize(.small) }
+                accessory()
+            }
+        } label: {
+            Label {
+                Text(title)
+                Text(detail).foregroundStyle(isInUse ? Color.green : Color.secondary)
+            } icon: {
+                Image(systemName: symbol).foregroundStyle(isInUse ? Color.green : Color.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var isInUse: Bool { if case .inUse = state { return true }; return false }
+
+    private var detail: String {
+        switch state {
+        case .inUse(let d?): "In use · \(d)"
+        case .inUse(nil): "In use"
+        case .available: "Available"
+        case .busy(let d), .missing(let d): d
+        case .off: "Off"
+        }
+    }
+}
+
+extension ConnectionRow where Accessory == EmptyView {
+    init(symbol: String, title: String, state: ConnectionState) {
+        self.init(symbol: symbol, title: title, state: state) { EmptyView() }
     }
 }

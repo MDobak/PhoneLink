@@ -39,18 +39,36 @@ struct SetupView: View {
 
 // MARK: - Layout
 
-/// The column has a maximum size because the main window can be large.
+/// One page of the setup assistant, with the layout of the macOS Setup Assistant: the page content is in the center,
+/// and the navigation buttons are in a bar at the bottom of the window. The buttons stay in the same position
+/// on all pages: Back at the leading edge, the primary action at the trailing edge.
+/// The column has a maximum width because the main window can be large.
 private struct SetupPage<Content: View, Buttons: View>: View {
     let title: String
     let subtitle: String
-    /// True for a Form that fills the height it gets.
-    var fills = true
     @ViewBuilder var content: Content
     @ViewBuilder var buttons: Buttons
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer(minLength: 0)
+            ScrollView {
+                page
+                    .padding(.horizontal, 30)
+                    .padding(.vertical, 24)
+                    .frame(maxWidth: .infinity)
+            }
+            .defaultScrollAnchor(.center)
+            .scrollBounceBehavior(.basedOnSize)
+            Divider()
+            HStack(spacing: 12) { buttons }
+                .controlSize(.large)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+        }
+    }
+
+    private var page: some View {
+        VStack(spacing: 0) {
             VStack(spacing: 8) {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable()
@@ -68,19 +86,11 @@ private struct SetupPage<Content: View, Buttons: View>: View {
             .frame(maxWidth: 460)
             .padding(.horizontal, 40)
 
+            // The page scrolls, so the content gets its full height. A grouped Form does not scroll itself.
             content
-                .frame(maxWidth: 520, maxHeight: fills ? 400 : nil)
-                .fixedSize(horizontal: false, vertical: !fills)
+                .frame(maxWidth: 520)
                 .padding(.top, 16)
-
-            HStack(spacing: 12) { buttons }
-                .controlSize(.large)
-                .frame(maxWidth: 500)
-                .padding(.top, 12)
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 30)
-        .padding(.vertical, 24)
     }
 }
 
@@ -122,8 +132,7 @@ private struct ChooseMethodPage: View {
 
     var body: some View {
         SetupPage(title: "Set Up Phone Link",
-                  subtitle: "Use your Android phone from this Mac.",
-                  fills: false) {
+                  subtitle: "Use your Android phone from this Mac.") {
             VStack(spacing: 10) {
                 Text("How do you want to connect the phone?")
                     .font(.headline)
@@ -131,7 +140,7 @@ private struct ChooseMethodPage: View {
                     .padding(.leading, 2)
                 MethodCard(symbol: "wifi", tint: .blue,
                            title: "With the Phone Link App",
-                           detail: "Phone Link is on the phone. Pair over the same Wi-Fi network.",
+                           detail: "Phone Link is on the phone. Pair over Wi-Fi or Bluetooth.",
                            selected: choice == .app) { choice = .app } open: { choice = .app; next() }
                 MethodCard(symbol: "cable.connector", tint: .green,
                            title: "With USB or Wireless Debugging",
@@ -139,6 +148,8 @@ private struct ChooseMethodPage: View {
                            selected: choice == .debugging) { choice = .debugging } open: { choice = .debugging; next() }
             }
             .fixedSize(horizontal: false, vertical: true)
+            // The same width as the sections of a grouped Form on the other pages.
+            .padding(.horizontal, 20)
             .onKeyPress(.upArrow) { choice = .app; return .handled }
             .onKeyPress(.downArrow) { choice = .debugging; return .handled }
         } buttons: {
@@ -209,24 +220,31 @@ private struct AppPairingPage: View {
                     Section {
                         if link.localNetworkBlocked {
                             LocalNetworkNotice()
-                        } else if link.discovered.isEmpty {
+                        }
+                        if link.discovered.isEmpty && link.nearbyPhones.isEmpty {
                             HStack(spacing: 10) {
                                 ProgressView().controlSize(.small)
-                                Text("Looking for phones on this network…").foregroundStyle(.secondary)
+                                Text("Looking for phones…").foregroundStyle(.secondary)
                             }
                         }
                         ForEach(link.discovered) { d in
-                            HStack(spacing: 10) {
-                                Image(systemName: "smartphone").font(.title3).foregroundStyle(.tint).frame(width: 24)
-                                Text(d.name.hasPrefix("Phone Link ") ? String(d.name.dropFirst(11)) : d.name)
-                                Spacer()
-                                Button("Pair") { link.connect(service: d.name) }.disabled(isBusy)
+                            let name = d.name.hasPrefix("Phone Link ") ? String(d.name.dropFirst(11)) : d.name
+                            if d.pairable {
+                                phoneRow(name, via: "Wi-Fi") { link.connect(service: d.name) }
+                            } else {
+                                // The phone is on the network, but pairing is not open on it.
+                                NotReadyPhoneRow(name: name, via: "Wi-Fi")
                             }
                         }
+                        // A phone on the same Wi-Fi network shows one time only.
+                        ForEach(link.nearbyPhones.filter { p in !link.discovered.contains { $0.name.replacingOccurrences(of: "Phone Link ", with: "").hasPrefix(p.name) } }, id: \.id) { p in
+                            // The phone sends only the first 10 bytes of its name.
+                            phoneRow(p.name.utf8.count >= 9 ? p.name + "…" : p.name, via: "Bluetooth") { link.connect(bluetooth: p.id) }
+                        }
                     } header: {
-                        Text("Phones on This Network")
+                        Text("Phones Nearby")
                     } footer: {
-                        Text("The phone and this Mac must be on the same Wi-Fi network.").settingsFooter()
+                        Text("The phone must be on the same Wi-Fi network as this Mac, or near this Mac with Bluetooth on. You do not need to pair the phone in Bluetooth settings.").settingsFooter()
                     }
 
                     Section {
@@ -254,6 +272,21 @@ private struct AppPairingPage: View {
             Button("Back", action: back).keyboardShortcut(.cancelAction)
             Spacer()
         }
+        .onAppear { link.startPairingScan() }
+        .onDisappear { link.stopPairingScan() }
+    }
+
+    private func phoneRow(_ name: String, via: String, pair: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "smartphone").font(.title3).foregroundStyle(.tint).frame(width: 24)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name)
+                Text(via).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Pair", action: pair).disabled(isBusy)
+        }
     }
 
     private var isBusy: Bool {
@@ -264,6 +297,47 @@ private struct AppPairingPage: View {
     private func connectToAddress() {
         guard !isBusy, !address.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         link.connect(host: address)
+    }
+}
+
+/// A phone that is near, but does not have pairing open. The row is dimmed. A click on the row or on the info
+/// button shows a popover with the step that makes the phone ready.
+private struct NotReadyPhoneRow: View {
+    let name: String
+    let via: String
+    /// Demo only: PHONELINK_DEMO_NOT_READY=1 opens the popover, for screenshots.
+    @State private var showHelp = PhoneLink.isDemo && ProcessInfo.processInfo.environment["PHONELINK_DEMO_NOT_READY"] == "1"
+
+    var body: some View {
+        Button { showHelp.toggle() } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "smartphone").font(.title3).frame(width: 24)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(name)
+                    Text(via).font(.caption)
+                }
+                Spacer()
+                Image(systemName: "info.circle")
+                    .font(.body)
+                    .accessibilityHidden(true)
+            }
+            .foregroundStyle(.secondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Not ready to pair")
+        .accessibilityLabel("\(name), \(via), not ready to pair")
+        .accessibilityHint("Shows how to make the phone ready")
+        .popover(isPresented: $showHelp, arrowEdge: .trailing) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Not Ready to Pair").font(.headline)
+                Text("On the phone, open Phone Link and tap Pair a new Mac.")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(16)
+            .frame(width: 260, alignment: .leading)
+        }
     }
 }
 
@@ -544,8 +618,7 @@ private struct ConfirmCodePage: View {
 
     var body: some View {
         SetupPage(title: "Confirm the Code",
-                  subtitle: "Make sure that \(link.phoneName.isEmpty ? "your phone" : link.phoneName) shows the same code. This keeps other devices out of the connection.",
-                  fills: false) {
+                  subtitle: "Make sure that \(link.phoneName.isEmpty ? "your phone" : link.phoneName) shows the same code. This keeps other devices out of the connection.") {
             VStack(spacing: 22) {
                 Text(code.prefix(3) + " " + code.suffix(3))
                     .font(.system(size: 52, weight: .semibold, design: .rounded))

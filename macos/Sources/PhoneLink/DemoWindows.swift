@@ -46,6 +46,9 @@ enum DemoWindows {
             case "files": FileHub.shared.loadDemo(); Router.shared.show(.files)
             case "deletephotos": PhoneLink.shared.loadDemoPhotos(); Router.shared.show(.photos)
             case "device": Router.shared.show(.device)
+            case "hotspot":
+                if ProcessInfo.processInfo.environment["PHONELINK_DEMO_HOTSPOT"] == "connected" { Router.shared.show(.messages) }
+                else { PhoneHotspot.shared.showSheet() }
             case "settings":
                 // Select the tab with the launch argument "-settingsTab <tag>" (general, phone, files, screen, remote or
                 // debugging). The argument does not change the saved value. PHONELINK_DEMO_SETTINGS_SHEET=features also

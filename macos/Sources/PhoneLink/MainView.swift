@@ -5,6 +5,7 @@ struct MainView: View {
     @EnvironmentObject private var link: PhoneLink
     @EnvironmentObject private var router: Router
     @Environment(\.dismissWindow) private var dismissWindow
+    @ObservedObject private var hotspot = PhoneHotspot.shared
     @State private var photo: Int64?
 
     var body: some View {
@@ -19,6 +20,7 @@ struct MainView: View {
         .modifier(WindowOpenerCapture())
         .background(LaunchHider { dismissWindow(id: "main") })
         .sheet(isPresented: $router.appPicker) { AppPickerSheet() }
+        .sheet(isPresented: $hotspot.sheetShown) { HotspotSheet() }
         .alert("Phone Link", isPresented: Binding(get: { link.banner != nil }, set: { if !$0 { link.banner = nil } })) {
             Button("OK") { link.banner = nil }
         } message: {
@@ -173,6 +175,11 @@ private struct DeviceFooter: View {
                     HStack(spacing: 4) {
                         Circle().fill(link.state == .connected ? Color.green : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)
                         Text(link.state == .connected ? "Connected" : link.state.summary).lineLimit(1)
+                        if link.state == .connected, let title = link.linkTitle, title != "Wi-Fi" {
+                            Image(systemName: link.linkSymbol).imageScale(.small)
+                                .help("Connected through \(title)")
+                                .accessibilityLabel("through \(title)")
+                        }
                         if link.state == .connected, let b = link.battery {
                             Text("· \(b)%").monospacedDigit()
                             if link.charging {
@@ -219,7 +226,15 @@ struct NotConnectedView: View {
                 Text(link.state == .idle ? "Make sure the phone is on the same Wi-Fi network and Phone Link is open on it." : link.state.summary)
             }
         } actions: {
-            if AdbManager.path != nil, link.isPaired { Button("Connect with USB") { link.connectUSB() } }
+            // One button for each line: the list column can be narrow.
+            if link.isPaired {
+                VStack(spacing: 8) {
+                    Button("Use \(PhoneHotspot.term)…") { PhoneHotspot.shared.showSheet() }
+                        .buttonStyle(.borderedProminent)
+                        .help("Connect when your Mac and phone are not on the same Wi-Fi network")
+                    if AdbManager.path != nil { Button("Connect with USB") { link.connectUSB() } }
+                }
+            }
         }
     }
 }

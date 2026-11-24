@@ -10,6 +10,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.usb.UsbAccessory
+import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.ConnectivityManager
@@ -30,7 +32,10 @@ import android.util.Log
 import java.io.FileDescriptor
 import java.io.PrintWriter
 import org.json.JSONObject
+import android.util.Base64
+import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import kotlin.concurrent.thread
 
@@ -47,6 +52,9 @@ class LinkService : Service() {
     @Volatile private var destroyed = false
     private var nsdListener: NsdManager.RegistrationListener? = null
     private var nsdNetwork: Network? = null
+    /** The "pair" value of the Bonjour TXT record now registered. */
+    private var nsdPairing = false
+    private val pairingEnded = Runnable { pairingChanged() }
     private var wifiLock: WifiManager.WifiLock? = null
     private var multicastLock: WifiManager.MulticastLock? = null
 
@@ -67,6 +75,24 @@ class LinkService : Service() {
             if ((level to plugged) == lastBattery) return
             lastBattery = level to plugged
             if (Hub.session != null) Hub.send(status())
+        }
+    }
+    private val usbLock = Object()
+    /** Guarded by usbLock. The phone opens each accessory attach one time only. */
+    private var usbUsed = false
+    private var usbLink: UsbLink? = null
+    private val usbReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            when (i.action) {
+                UsbManager.ACTION_USB_ACCESSORY_DETACHED -> synchronized(usbLock) {
+                    usbUsed = false
+                    usbLink?.close()
+                }
+                // Sticky. Also comes when the phone is locked and Android does not start UsbAccessoryActivity.
+                "android.hardware.usb.action.USB_STATE" ->
+                    if (i.getBooleanExtra("connected", false) && i.getBooleanExtra("accessory", false)) openAccessory(null, false)
+                android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED -> Bluetooth.refresh(this@LinkService)
+            }
         }
     }
     // The service type must include mediaProjection while this is true.
@@ -93,9 +119,51 @@ class LinkService : Service() {
         // After an app update Android can leave the notification listener unbound.
         NotifListener.rebind(this)
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        registerReceiver(usbReceiver, IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
+            addAction("android.hardware.usb.action.USB_STATE")
+            addAction(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+        }, RECEIVER_EXPORTED)
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_ACCESSORY) {
+            intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY, UsbAccessory::class.java)?.let { openAccessory(it, true) }
+        }
+        return START_STICKY
+    }
+
+    /**
+     * Starts a session on the USB accessory of the Mac. acc null: the attached accessory. attached: Android reported
+     * a new attach, so the accessory was not opened yet.
+     */
+    fun openAccessory(acc: UsbAccessory?, attached: Boolean) {
+        val um = getSystemService(UsbManager::class.java)
+        val a = acc ?: um.accessoryList?.firstOrNull() ?: return
+        if (a.manufacturer != "Phone Link" || a.model != "Mac" || !um.hasPermission(a)) return
+        synchronized(usbLock) {
+            if (attached) usbUsed = false
+            if (usbUsed) return
+            usbUsed = true
+            usbLink?.close()
+        }
+        thread(name = "phonelink-usb") {
+            var link: UsbLink? = null
+            try {
+                val pfd = um.openAccessory(a) ?: throw java.io.IOException("cannot open the accessory")
+                link = UsbLink(pfd)
+                synchronized(usbLock) { usbLink = link }
+                link.output.write(USB_READY)
+                link.output.flush()
+                Session(this, link).run()
+            } catch (e: Exception) {
+                Log.w("PhoneLink", "USB connection failed: $e")
+            } finally {
+                link?.close()
+                synchronized(usbLock) { if (usbLink === link) usbLink = null }
+            }
+        }
+    }
 
     override fun onDestroy() {
         destroyed = true
@@ -111,6 +179,10 @@ class LinkService : Service() {
         Photos.stop(this)
         Calls.stop(this)
         try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
+        synchronized(usbLock) { usbLink?.close() }
+        Bluetooth.stop()
+        PrivateWifi.stop()
         wifiLock?.takeIf { it.isHeld }?.release()
         Hub.service = null
         super.onDestroy()
@@ -152,12 +224,14 @@ class LinkService : Service() {
         Mms.observe(this)
         Photos.observe(this)
         Calls.listen(this)
+        Bluetooth.refresh(this)
         if (Hub.session != null) Hub.send(status())
     }
 
     fun onSessionChanged() = main.post {
         val connected = Hub.session != null
         if (!connected) stopScreen()
+        if (!connected) PrivateWifi.sessionEnded()
         val wm = applicationContext.getSystemService(WifiManager::class.java)
         // Low latency works only with the screen on and an app of this phone in front. With the screen off Android
         // ignores the lock (Android 14+ also ignores the high-performance lock).
@@ -181,7 +255,7 @@ class LinkService : Service() {
                     val sock = ss.accept()
                     thread(name = "phonelink-rx") {
                         // An uncaught exception in a thread kills the app. Session.run() catches its own errors.
-                        try { Session(this, sock).run() } catch (e: Exception) {
+                        try { Session(this, TcpLink(sock)).run() } catch (e: Exception) {
                             Log.w("PhoneLink", "connection failed: $e")
                             try { sock.close() } catch (_: Exception) {}
                         }
@@ -205,7 +279,9 @@ class LinkService : Service() {
     private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             main.post { if (!destroyed && network != nsdNetwork) registerNsd(network) }
+            sendLinksSoon()
         }
+        override fun onLost(network: Network) = sendLinksSoon()
     }
 
     private fun watchWifi() {
@@ -222,10 +298,13 @@ class LinkService : Service() {
         nsdListener?.let { try { nsd.unregisterService(it) } catch (_: Exception) {} }
         nsdListener = null
         nsdNetwork = network
+        nsdPairing = Hub.isPairing()
         val info = NsdServiceInfo().apply {
             serviceName = phoneName(this@LinkService)
             serviceType = SERVICE_TYPE
             port = PORT
+            // The Mac shows the phone in its pairing list only while pairing is open.
+            setAttribute("pair", if (nsdPairing) "1" else "0")
         }
         val l = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(i: NsdServiceInfo) {}
@@ -247,10 +326,55 @@ class LinkService : Service() {
         if (args?.contains("pair") == true) {
             Hub.pairingUntil = System.currentTimeMillis() + 120_000
             Hub.changed()
+            pairingChanged()
             writer?.println("phonelink-pairing=on")
         }
         writer?.println("phonelink-token=" + (adbToken ?: "none"))
     }
+
+    /**
+     * Call when pairing opens or closes. Changes the Bluetooth advertisement and the Bonjour TXT record,
+     * and does this again when pairing ends.
+     */
+    fun pairingChanged() {
+        main.post {
+            if (destroyed) return@post
+            Bluetooth.refresh(this)
+            if (Hub.isPairing() != nsdPairing) registerNsd(nsdNetwork)
+            main.removeCallbacks(pairingEnded)
+            if (Hub.isPairing()) main.postDelayed(pairingEnded, Hub.pairingUntil - System.currentTimeMillis() + 500)
+        }
+    }
+
+    private val sendLinks = Runnable { Hub.session?.send(links()) }
+
+    /** The addresses change a moment after the network. */
+    private fun sendLinksSoon() {
+        main.removeCallbacks(sendLinks)
+        main.postDelayed(sendLinks, 2000)
+    }
+
+    /**
+     * The ways that the Mac can reach this phone. The Mac uses them to change to a faster connection, for example
+     * from Bluetooth to Wi-Fi without Bonjour.
+     */
+    fun links(): JSONObject = json(
+        "t" to "links",
+        "ips" to localAddresses().toJsonArray { it },
+        "bleKey" to Base64.encodeToString(Bluetooth.beaconKey(this), Base64.NO_WRAP),
+        "privateWifi" to PrivateWifi.json(),
+    )
+
+    /** Private IPv4 addresses of Wi-Fi, hotspot and Ethernet interfaces. Not the mobile network. */
+    private fun localAddresses(): List<String> = try {
+        val mobile = listOf("rmnet", "ccmni", "v4-", "clat", "dummy", "tun", "ifb", "r_rmnet")
+        NetworkInterface.getNetworkInterfaces().toList()
+            .filter { i -> i.isUp && !i.isLoopback && mobile.none { i.name.startsWith(it) } }
+            .flatMap { it.inetAddresses.toList() }
+            .filter { it is Inet4Address && it.isSiteLocalAddress }
+            .mapNotNull { it.hostAddress }
+            .distinct()
+    } catch (_: Exception) { emptyList() }
 
     fun status(): JSONObject {
         val b = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -264,6 +388,8 @@ class LinkService : Service() {
             "battery" to level,
             "charging" to plugged,
             "adbWifi" to json("granted" to AdbWifi.granted(this), "on" to AdbWifi.enabled(this)),
+            "uplink" to Hotspot.uplink(this),
+            "hotspot" to Hotspot.isOn(this),
             "perms" to json(
                 "sms" to (has(android.Manifest.permission.READ_SMS) && has(android.Manifest.permission.SEND_SMS)),
                 "contacts" to has(android.Manifest.permission.READ_CONTACTS),
@@ -427,6 +553,8 @@ class LinkService : Service() {
     }
 
     companion object {
+        const val ACTION_ACCESSORY = "com.mdobak.phonelink.ACCESSORY"
+
         private fun batteryLevel(i: Intent) =
             i.getIntExtra(BatteryManager.EXTRA_LEVEL, 0) * 100 / i.getIntExtra(BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
 

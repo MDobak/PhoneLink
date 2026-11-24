@@ -163,6 +163,8 @@ final class AdbAgent: ObservableObject {
             self?.hotspotOn = r["on"] as? Bool
             self?.hotspotName = r["ssid"] as? String
             self?.hotspotPassword = r["password"] as? String
+            // Saved so that the Mac can join the hotspot later without debugging (PhoneHotspot).
+            if let ssid = r["ssid"] as? String { PhoneHotspot.shared.remember(ssid: ssid, password: r["password"] as? String) }
             done?(nil)
         }
     }
@@ -199,30 +201,12 @@ final class AdbAgent: ObservableObject {
     func joinHotspot(done: @escaping (String?) -> Void) {
         guard let ssid = hotspotName, !ssid.isEmpty else { done("The phone did not give the hotspot name."); return }
         let password = hotspotPassword
-        DispatchQueue.global(qos: .userInitiated).async {
-            func run(_ args: [String]) -> String {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
-                p.arguments = args
-                let pipe = Pipe()
-                p.standardOutput = pipe
-                p.standardError = pipe
-                guard (try? p.run()) != nil else { return "Error" }
-                let d = pipe.fileHandleForReading.readDataToEndOfFile()
-                p.waitUntilExit()
-                return String(decoding: d, as: UTF8.self)
+        Task { @MainActor in
+            switch await PhoneHotspot.join(ssid: ssid, password: password) {
+            case .joined: done(nil)
+            case .notFound: done("The Mac cannot find “\(ssid)”.")
+            case .failed(let why): done(why)
             }
-            let ports = run(["-listallhardwareports"]).components(separatedBy: "\n")
-            var device = "en0"
-            if let i = ports.firstIndex(where: { $0.contains("Wi-Fi") || $0.contains("AirPort") }), i + 1 < ports.count,
-               let r = ports[i + 1].range(of: "Device: ") {
-                device = String(ports[i + 1][r.upperBound...]).trimmingCharacters(in: .whitespaces)
-            }
-            var args = ["-setairportnetwork", device, ssid]
-            if let password, !password.isEmpty { args.append(password) }
-            let out = run(args)
-            let failed = out.contains("Error") || out.contains("Could not") || out.contains("Failed")
-            DispatchQueue.main.async { done(failed ? "The Mac could not join “\(ssid)”." : nil) }
         }
     }
 

@@ -248,9 +248,10 @@ private struct DeviceSettings: View {
     private var connectionText: String {
         let usb = adb.devices.first { $0.serial == link.adbSerial }?.usb
         let debug = link.adbSerial == nil ? nil : (usb == true ? "USB cable" : "Wireless debugging")
+        let app = link.linkTitle.map { "Phone Link app (\($0))" } ?? "Phone Link app"
         switch (link.sessionConnected, debug) {
-        case (true, let d?): return "Phone Link app and \(d)"
-        case (true, nil): return "Phone Link app"
+        case (true, let d?): return "\(app) and \(d)"
+        case (true, nil): return app
         case (false, let d?): return d
         default: return "None"
         }

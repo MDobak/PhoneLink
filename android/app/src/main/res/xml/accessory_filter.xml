@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TEST ONLY: the Mac test tool (AOA) sends these strings. -->
+<resources>
+    <usb-accessory manufacturer="Phone Link" model="Mac" />
+</resources>

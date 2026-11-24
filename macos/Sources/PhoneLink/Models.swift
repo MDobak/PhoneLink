@@ -210,4 +210,6 @@ enum ScreenQuality: String, CaseIterable, Identifiable {
 struct Discovered: Identifiable, Hashable {
     var id: String { name }
     let name: String
+    /// True while pairing is open on the phone. Old phone apps do not send the "pair" value, so they are always true.
+    var pairable = true
 }

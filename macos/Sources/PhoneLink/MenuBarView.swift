@@ -11,6 +11,7 @@ struct MenuBarView: View {
     @ObservedObject private var terminal = RemoteTerminal.shared
     @ObservedObject private var controls = QuickControls.shared
     @ObservedObject private var controlPins = ControlPins.shared
+    @ObservedObject private var hotspot = PhoneHotspot.shared
     @AppStorage("menuShowsSound") private var showsSoundSetting = true
     /// Demo only: media to show when the phone sends none.
     var previewMedia: MediaInfo? = nil
@@ -107,7 +108,7 @@ struct MenuBarView: View {
     }
     private var hasItemRows: Bool {
         if !link.hasPhone { return true }
-        guard connected else { return false }
+        guard connected else { return link.isPaired }
         return !link.threads.isEmpty || !link.notifications.isEmpty || link.shows(.screen) || link.shows(.files)
     }
     /// The Controls grid shows when a side reports controls, or when a pinned control that needs no report can be used.
@@ -129,6 +130,12 @@ struct MenuBarView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                } else {
+                    // All connections in use: the app link, then the shell helper.
+                    Label(connectionText, systemImage: link.linkSymbol)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
             Spacer(minLength: 8)
@@ -138,6 +145,19 @@ struct MenuBarView: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private var connectionText: String {
+        let app = link.viaHotspot && !link.usesPrivateWifi ? hotspotStatus : link.linkTitle
+        return [app, link.shellTitle].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private var hotspotStatus: String {
+        switch link.phoneUplink {
+        case "cellular": "\(PhoneHotspot.term) · Uses Mobile Data"
+        case "wifi": "\(PhoneHotspot.term) · Wi-Fi Sharing"
+        default: PhoneHotspot.term
+        }
     }
 
     private var statusText: String {
@@ -152,7 +172,9 @@ struct MenuBarView: View {
     @ViewBuilder private var itemRows: some View {
         if !link.hasPhone {
             IconRow(title: "Set Up Phone Link…", symbol: "link") { router.show(nil) }
-        } else if connected {
+        } else if !connected {
+            HotspotMenuRow()
+        } else {
             if !link.threads.isEmpty {
                 IconRow(title: "Messages", symbol: "message.fill",
                         value: link.unreadCount > 0 ? "\(link.unreadCount) Unread" : nil,
@@ -492,5 +514,64 @@ private struct CallControlButton: View {
         .buttonStyle(.plain)
         .help(label)
         .accessibilityLabel(label)
+    }
+}
+
+/// Connects through the phone hotspot from the menu bar. Shows the progress in place, so no window opens when the
+/// hotspot is saved. With no saved hotspot, it opens the steps in the main window.
+private struct HotspotMenuRow: View {
+    @EnvironmentObject private var link: PhoneLink
+    @ObservedObject private var hotspot = PhoneHotspot.shared
+
+    private var term: String { PhoneHotspot.term }
+
+    var body: some View {
+        switch hotspot.phase {
+        case .idle:
+            IconRow(title: "Connect Through \(term)" + (hotspot.network == nil ? "…" : ""), symbol: "personalhotspot",
+                    help: "Use the phone hotspot when your Mac and phone are not on the same Wi-Fi network") { hotspot.connect() }
+        case .joining:
+            StatusMenuRow(title: "Waiting for Hotspot…", detail: "Turn on \(term) on your phone.",
+                          action: "Cancel") { hotspot.cancel() }
+        case .joined:
+            StatusMenuRow(title: "Connecting…", detail: "Your Mac is on the hotspot.", action: "Cancel") { hotspot.cancel() }
+        case .failed(let why):
+            StatusMenuRow(title: "Cannot Connect", detail: why, failed: true, action: "Try Again") { hotspot.connect() }
+        }
+    }
+}
+
+private struct StatusMenuRow: View {
+    let title: String
+    let detail: String
+    var failed = false
+    let action: String
+    let perform: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Group {
+                if failed {
+                    Image(systemName: "exclamationmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 26, height: 26)
+                        .background(Circle().fill(Color(nsColor: .systemOrange)))
+                } else {
+                    ProgressView().controlSize(.small).frame(width: 26, height: 26)
+                }
+            }
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 13)).lineLimit(1)
+                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .lineLimit(4).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(action, action: perform)
+                .controlSize(.small)
+        }
+        .menuRow(vertical: 3)
+        .accessibilityElement(children: .contain)
     }
 }

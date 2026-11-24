@@ -7,7 +7,6 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
@@ -34,9 +33,10 @@ const val VIDEO_KEY = 2
  * its plain text starts with a type byte: MSG_JSON, MSG_VIDEO (flags, pts, H.264 Annex B),
  * MSG_FILE (Transfers.kt), MSG_AUDIO (PCM), MSG_RD_VIDEO or MSG_TERM.
  */
-class Session(private val svc: LinkService, private val socket: Socket) {
-    private val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 1 shl 16))
-    private val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 1 shl 16))
+class Session(private val svc: LinkService, private val link: Link) {
+    private val watched = WatchedInput(link.input)
+    private val input = DataInputStream(BufferedInputStream(watched, 1 shl 16))
+    private val output = DataOutputStream(BufferedOutputStream(link.output, 1 shl 16))
     private lateinit var tx: FrameCipher
     private lateinit var rx: FrameCipher
 
@@ -55,16 +55,18 @@ class Session(private val svc: LinkService, private val socket: Socket) {
         private set
     var macId = ""
         private set
+    /** The Mac is on the hotspot of this phone. */
+    val viaHotspot: Boolean get() = link.localAddress?.let { Hotspot.isTethered(svc, it) } ?: false
+    val kind: LinkKind get() = link.kind
     private val io = Executors.newSingleThreadExecutor()
     private val sentIcons = HashSet<String>()
 
     fun run() {
         try {
-            socket.tcpNoDelay = true
-            socket.soTimeout = 150_000
+            thread(name = "phonelink-watch") { watch() }
             handshake()
             // The Mac pings every 10 s. 45 s with no data means the connection is dead.
-            socket.soTimeout = 45_000
+            watched.limitMs = 45_000
             // A new connection replaces the previous one (e.g. after the Mac lost the connection).
             synchronized(Hub) {
                 Hub.session?.takeIf { it !== this }?.close()
@@ -79,6 +81,16 @@ class Session(private val svc: LinkService, private val socket: Socket) {
             if (!closed) Log.i(TAG, "session ended: $e")
         } finally {
             close()
+        }
+    }
+
+    private fun watch() {
+        while (!closed) {
+            try { Thread.sleep(5_000) } catch (_: InterruptedException) { return }
+            if (watched.stalled()) {
+                Log.i(TAG, "no data from the Mac")
+                close()
+            }
         }
     }
 
@@ -146,6 +158,7 @@ class Session(private val svc: LinkService, private val socket: Socket) {
             require(c.optBoolean("ok") && MessageDigest.isEqual(unb64(c.optString("mac")), expect)) { "pairing rejected on Mac" }
             Pairings.save(svc, macId, macName, pairKey)
             Hub.pairingUntil = 0
+            svc.pairingChanged()
             key = pairKey
         } else {
             val k = Pairings.key(svc, macId)
@@ -283,6 +296,7 @@ class Session(private val svc: LinkService, private val socket: Socket) {
         Sms.resetCursor(svc)
         Mms.resetCursor(svc)
         send(svc.status())
+        send(svc.links())
         Calls.current?.let { send(it) }
         Media.sessionStarted()
         if (Ringer.ringing) send(json("t" to "ring.state", "ringing" to true))
@@ -305,6 +319,8 @@ class Session(private val svc: LinkService, private val socket: Socket) {
         when (type) {
             "ping" -> send(json("t" to "pong"))
             "status" -> send(svc.status())
+            "lohs.start" -> PrivateWifi.start(svc) { send(it) }
+            "lohs.stop" -> PrivateWifi.stop()
             "adb.token" -> svc.adbToken = m.optString("token").takeIf { it.length in 16..64 }
             "adb.wifi" -> send(AdbWifi.enable(svc))
 
@@ -367,6 +383,7 @@ class Session(private val svc: LinkService, private val socket: Socket) {
             "unpair" -> {
                 // The Mac forgot this phone, so forget the Mac too.
                 Pairings.remove(svc, macId)
+                Bluetooth.refresh(svc)
                 Hub.changed()
                 close()
             }
@@ -382,7 +399,7 @@ class Session(private val svc: LinkService, private val socket: Socket) {
     fun close() {
         if (!closing.compareAndSet(false, true)) return
         closed = true
-        try { socket.close() } catch (_: Exception) {}
+        link.close()
         io.shutdownNow()
         Controls.stop(this)
         synchronized(fileLock) { fileLock.notifyAll() }

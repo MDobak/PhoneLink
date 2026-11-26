@@ -1,5 +1,6 @@
 package com.mdobak.phonelink
 
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.Context
 import android.database.ContentObserver
@@ -10,9 +11,11 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Base64
+import android.util.Log
 import android.util.Size
 import org.json.JSONArray
 import java.io.ByteArrayOutputStream
+import java.io.FileNotFoundException
 import java.io.InputStream
 import java.util.concurrent.Executors
 
@@ -27,9 +30,9 @@ object Photos {
         val items = JSONArray()
         try {
             val args = Bundle().apply {
-                putStringArray(android.content.ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Images.Media.DATE_ADDED))
-                putInt(android.content.ContentResolver.QUERY_ARG_SORT_DIRECTION, android.content.ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
-                putInt(android.content.ContentResolver.QUERY_ARG_LIMIT, limit.coerceIn(1, 500))
+                putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Images.Media.DATE_ADDED))
+                putInt(ContentResolver.QUERY_ARG_SORT_DIRECTION, ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
+                putInt(ContentResolver.QUERY_ARG_LIMIT, limit.coerceIn(1, 500))
             }
             val cols = arrayOf(
                 MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.DATE_TAKEN,
@@ -47,11 +50,11 @@ object Photos {
                 }
             }
             s.send(json("t" to "photos.list", "items" to items))
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             s.send(json("t" to "photos.list", "items" to items, "error" to "Allow Photos in Phone Link on the phone."))
         } catch (e: Exception) {
             // An exception that leaves the pool thread stops the app.
-            android.util.Log.w("PhoneLink", "photos list: ${e.javaClass.simpleName}")
+            Log.w("PhoneLink", "photos list: ${e.javaClass.simpleName}")
             s.send(json("t" to "photos.list", "items" to items, "error" to "The phone cannot read its photos."))
         }
     }
@@ -78,7 +81,7 @@ object Photos {
         ctx.contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.SIZE), null, null, null)?.use { c ->
             if (c.moveToFirst()) { name = c.getString(0) ?: name; size = c.getLong(1) }
         }
-        val input = ctx.contentResolver.openInputStream(uri) ?: throw java.io.FileNotFoundException("The photo is not available.")
+        val input = ctx.contentResolver.openInputStream(uri) ?: throw FileNotFoundException("The photo is not available.")
         return Triple(name, size, input)
     }
 

@@ -77,9 +77,14 @@ int pu_watch(dispatch_queue_t q, pu_callback cb, void *ctx) {
     *rem = (watcher){cb, ctx, 0};
     io_iterator_t a = 0, r = 0;
     kern_return_t kr = IOServiceAddMatchingNotification(port, kIOFirstMatchNotification, IOServiceMatching("IOUSBHostDevice"), drain, add, &a);
-    if (kr) return kr;
-    kr = IOServiceAddMatchingNotification(port, kIOTerminatedNotification, IOServiceMatching("IOUSBHostDevice"), drain, rem, &r);
-    if (kr) return kr;
+    if (!kr) kr = IOServiceAddMatchingNotification(port, kIOTerminatedNotification, IOServiceMatching("IOUSBHostDevice"), drain, rem, &r);
+    if (kr) {
+        if (a) IOObjectRelease(a);
+        IONotificationPortDestroy(port);
+        free(add);
+        free(rem);
+        return kr;
+    }
     // Arm the notifications and report the devices that are attached now. The port and iterators live as long as the app.
     dispatch_async(q, ^{ drain(add, a); drain(rem, r); });
     return 0;

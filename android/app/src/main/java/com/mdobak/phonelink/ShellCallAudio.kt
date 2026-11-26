@@ -27,9 +27,9 @@ import kotlin.system.exitProcess
  *
  * Frames as in ShellServer: 4-byte big-endian length, type byte, body.
  * Type 1 is UTF-8 JSON. Type 3 is PCM 16 kHz mono s16le, 320 samples (20 ms) per frame.
- * - To Mac: hello {sdk, interceptable}; call.state {active, ringing, mode, voip, audio, muteMic, micMuted, error?}
+ * - To Mac: hello {sdk, interceptable}; call.state {active, ringing, mode, telephony, voip, audio, muteMic, micMuted, error?}
  *   on each change; call.stats every 5 s while audio is on; downlink frames while "audio" is true.
- * - From Mac: call.audio {on, muteMic}, call.state, ping, stop, and uplink frames.
+ * - From Mac: call.audio {on, muteMic}, call.dtmf {digits}, call.state, ping, stop, and uplink frames.
  * Audio stops when the call ends. The Mac must send call.audio again for the next call.
  *
  * Privacy: never store audio. Logcat (tag PhoneLinkCall) gets only counts and levels.
@@ -51,17 +51,17 @@ object ShellCallAudio {
     private val outLock = Object()
     private val ctl = Object()
 
-    // Guarded by ctl.
+    // Written with ctl held. The audio threads read audioOn, session and track without it.
     private var connected = false
     private var wanted = false
     private var muteMic = false
-    private var audioOn = false
+    @Volatile private var audioOn = false
     private var error: String? = null
     private var mutedByUs = false
     private var oldMute = false
     private var record: AudioRecord? = null
-    private var track: AudioTrack? = null
-    private var session = 0
+    @Volatile private var track: AudioTrack? = null
+    @Volatile private var session = 0
     private var lastState = ""
 
     private val queue = ArrayDeque<ShortArray>()
@@ -116,7 +116,7 @@ object ShellCallAudio {
         Log.i(TAG, "mac disconnected")
         synchronized(ctl) { connected = false; wanted = false; update() }
         try { client.close() } catch (_: Exception) {}
-        System.exit(0)
+        exitProcess(0)
     }
 
     private fun handle(m: JSONObject): Boolean {
@@ -262,7 +262,7 @@ object ShellCallAudio {
             record = r
             track = t
             synchronized(queue) { queue.clear() }
-            downFrames = 0; upFrames = 0; upDropped = 0; upUnderruns = 0; downSq = 0.0; upSq = 0.0
+            downFrames = 0; upFrames = 0; upDropped = 0; upTrimmed = 0; upUnderruns = 0; downQuiet = 0; downSq = 0.0; upSq = 0.0
             audioOn = true
             error = null
             session++
@@ -370,8 +370,6 @@ object ShellCallAudio {
         return out
     }
 
-    private var windowMin = Int.MAX_VALUE
-    private var windowCount = 0
     @Volatile private var upTrimmed = 0
 
     // The blocking track write is the clock. Write silence when no Mac audio is queued so latency does not grow.
@@ -380,6 +378,8 @@ object ShellCallAudio {
             t.play()
             val silence = ShortArray(FRAME)
             var priming = true
+            var windowMin = Int.MAX_VALUE
+            var windowCount = 0
             while (live(s)) {
                 // A tone frame replaces a mic frame so latency does not grow.
                 val tone = nextToneFrame()
@@ -418,12 +418,11 @@ object ShellCallAudio {
         }
     }
 
-    private var lastHead = 0
     @Volatile private var writeMsMax = 0L
 
     // Counts and RMS levels only, never audio.
     private fun stats(s: Int) {
-        lastHead = 0
+        var lastHead = 0
         var lastDown = 0
         var lastUp = 0
         while (true) {

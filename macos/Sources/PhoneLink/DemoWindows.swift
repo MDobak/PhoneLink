@@ -5,13 +5,13 @@ import SwiftUI
 enum DemoWindows {
     static var window: NSWindow?
     static func open() {
-        // Demo only: PHONELINK_DEMO_APPEARANCE=light or dark sets the appearance of all windows.
+        // PHONELINK_DEMO_APPEARANCE=light or dark sets the appearance of all windows.
         switch ProcessInfo.processInfo.environment["PHONELINK_DEMO_APPEARANCE"] {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
         default: break
         }
-        // Demo only: PHONELINK_DEMO_MEDIA=1 shows sample media in the Now Playing tile.
+        // PHONELINK_DEMO_MEDIA=1 shows sample media in the Now Playing tile.
         let media = ProcessInfo.processInfo.environment["PHONELINK_DEMO_MEDIA"] == nil ? nil
             : MediaInfo(app: "Spotify", title: "Midnight City", artist: "M83", playing: true, position: 0, duration: 0,
                         canNext: true, canPrevious: true, updated: Date())
@@ -33,7 +33,7 @@ enum DemoWindows {
             switch ProcessInfo.processInfo.environment["PHONELINK_DEMO"] {
             case "phone", "call": Router.shared.show(.phone)
             case "notifications": Router.shared.show(.notifications)
-            // Demo only: opens the WhatsApp group and the card of its second notification.
+            // Opens the WhatsApp group at its second notification.
             case "notificationsopen": Router.shared.show(.notifications, notification: "n1b")
             case "compose": Router.shared.show(.messages, compose: true)
             case "screen": Router.shared.mirror()
@@ -50,14 +50,12 @@ enum DemoWindows {
                 if ProcessInfo.processInfo.environment["PHONELINK_DEMO_HOTSPOT"] == "connected" { Router.shared.show(.messages) }
                 else { PhoneHotspot.shared.showSheet() }
             case "settings":
-                // Select the tab with the launch argument "-settingsTab <tag>" (general, phone, files, screen, remote or
-                // debugging). The argument does not change the saved value. PHONELINK_DEMO_SETTINGS_SHEET=features also
-                // opens the Connection per Feature sheet in the debugging tab.
+                // The launch argument "-settingsTab <tag>" selects a tab (see SettingsView.tabs) and does not change
+                // the saved value. PHONELINK_DEMO_SETTINGS_SHEET=features also opens the Connection per Feature sheet.
                 AdbManager.shared.loadDemo()
-                // The "showSettingsWindow:" action does not open Settings on macOS 14 and later. Use the SwiftUI action.
                 Router.shared.showSettings()
             case "remoteaccess":
-                // Demo only: Remote Desktop shows as in use. Use with "-settingsTab remote".
+                // Remote Desktop shows as in use. Use with "-settingsTab remote".
                 RemoteDesktopHost.shared.showDemo()
                 Router.shared.showSettings()
             default: Router.shared.show(.messages, thread: 1)

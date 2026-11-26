@@ -23,7 +23,7 @@ object RemoteGate {
         if (unlocked) leftAt = SystemClock.elapsedRealtime()
     }
 
-    fun isOpen(): Boolean =
+    private fun isOpen(): Boolean =
         unlocked && (leftAt == 0L || SystemClock.elapsedRealtime() - leftAt < GRACE_MS)
 
     fun unlock(a: Activity, subtitle: String, ok: () -> Unit, failed: () -> Unit) {

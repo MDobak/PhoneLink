@@ -55,12 +55,16 @@ private struct MenuBarIcon: View {
     @ObservedObject var link: PhoneLink
     @ObservedObject private var desktop = RemoteDesktopHost.shared
     @ObservedObject private var terminal = RemoteTerminal.shared
+    @ObservedObject private var agents = AgentServer.shared
 
     var body: some View {
         Group {
             if link.call?.state == "ringing" {
                 Image(systemName: "phone.fill").symbolEffect(.pulse)
                     .accessibilityLabel("Phone Link, incoming call")
+            } else if link.state == .connected, agents.active {
+                Image(nsImage: Self.agent)
+                    .accessibilityLabel("Phone Link, connected, an agent uses your phone")
             } else if link.state == .connected {
                 Image(nsImage: Self.connected)
                     .accessibilityLabel(desktop.active ? "Phone Link, connected, your phone is controlling this Mac"
@@ -77,10 +81,12 @@ private struct MenuBarIcon: View {
     private static let connected = linkMark()
     /// The same mark at reduced alpha, so it looks dimmed in light and dark mode.
     private static let dimmed = linkMark(alpha: 0.4)
+    /// The mark with a dot at the top right: an agent uses the phone.
+    private static let agent = linkMark(badge: true)
 
     /// Draws the Link mark from the app icon as a one-color template image on an 18 x 18 pt canvas.
     /// The phone link is on top at the upper crossing; the Mac link is on top at the lower crossing.
-    private static func linkMark(alpha: CGFloat = 1) -> NSImage {
+    private static func linkMark(alpha: CGFloat = 1, badge: Bool = false) -> NSImage {
         let w: CGFloat = 1.5, gap: CGFloat = 1, radius: CGFloat = 2.5
         let phone = CGRect(x: 1, y: 2, width: 7.5, height: 14), mac = CGRect(x: 4, y: 5.5, width: 13, height: 7)
         let img = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
@@ -99,6 +105,13 @@ private struct MenuBarIcon: View {
             ctx.beginTransparencyLayer(auxiliaryInfo: nil)
             link(mac, cut: CGRect(x: phone.maxX - w - gap, y: mac.minY - 1, width: w + 2 * gap, height: w + 2))
             link(phone, cut: CGRect(x: phone.maxX - w - 1, y: mac.maxY - w - gap, width: w + 2, height: w + 2 * gap))
+            if badge {
+                let dot = CGRect(x: 12, y: 0, width: 6, height: 6)
+                ctx.setBlendMode(.destinationOut)
+                ctx.fillEllipse(in: dot.insetBy(dx: -1.5, dy: -1.5))
+                ctx.setBlendMode(.normal)
+                ctx.fillEllipse(in: dot)
+            }
             ctx.endTransparencyLayer()
             return true
         }
@@ -213,9 +226,11 @@ private struct PhoneLinkCommands: Commands {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let services = ServiceProvider()
+
     func applicationDidFinishLaunching(_ n: Notification) {
         UserDefaults.standard.register(defaults: ["mirrorNotifications": true, "notificationSounds": true,
-                                                  "screenQuality": ScreenQuality.high.rawValue, 
+                                                  "screenQuality": ScreenQuality.high.rawValue,
                                                   "receiveFiles": true, "shareFolders": false, "shareWritable": false,
                                                   "shareClipboard": true, "focusSync": false, "lowBatteryAlert": true, "autoWirelessDebugging": true,
                                                   "screenSound": true, CallAudio.settingKey: true, "spotlight": true, "adbAutoConnect": true, "driveAutoMount": true, DockShims.settingKey: true])
@@ -228,14 +243,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         PhoneLink.shared.start()
         AdbAgent.shared.start()
         CallAudio.shared.start()
+        if !PhoneLink.isDemo { AgentServer.shared.start() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { LaunchState.done = true }
         _ = AppsModel.shared
         _ = PhoneDrive.shared
         CallPanelController.shared.start()
         if PhoneLink.isDemo, !["setup", "pair"].contains(ProcessInfo.processInfo.environment["PHONELINK_DEMO"] ?? "") { DemoWindows.open() }
     }
-
-    private let services = ServiceProvider()
 
     func applicationWillFinishLaunching(_ n: Notification) {
         // Handle phonelink:// links here, so that SwiftUI does not open an empty window for them.
@@ -294,9 +308,9 @@ final class Router: ObservableObject {
     var openWindow: OpenWindowAction?
     var openSettings: OpenSettingsAction?
 
-    /// Tabs: general, phone, controls, files, screen, remote, debugging.
+    /// `tab` is a tag from SettingsView.tabs. An unknown tag keeps the current tab.
     func showSettings(_ tab: String? = nil) {
-        if let tab { UserDefaults.standard.set(tab, forKey: "settingsTab") }
+        if let tab, SettingsView.tabs.contains(tab) { UserDefaults.standard.set(tab, forKey: "settingsTab") }
         NSApp.activate(ignoringOtherApps: true)
         openSettings?()
     }
@@ -317,12 +331,7 @@ final class Router: ObservableObject {
     }
 
     func mirror() {
-        if screenDetached {
-            NSApp.activate(ignoringOtherApps: true)
-            openWindow?(id: "screen")
-        } else {
-            show(.screen)
-        }
+        if screenDetached { detachScreen() } else { show(.screen) }
     }
 
     /// Needs USB or Wireless debugging.

@@ -54,12 +54,10 @@ final class DockShims: NSObject {
         if !e.bigIconAsked, pkg != AppStream.desktopID, AdbAgent.shared.ready {
             e.bigIconAsked = true
             AdbAgent.shared.request(["t": "icon", "pkg": pkg, "size": 256]) { [weak self] r in
-                let img = (r?["png"] as? String).flatMap { Data(base64Encoded: $0) }.flatMap(NSImage.init(data:))
-                DispatchQueue.main.async {
-                    guard let self, let img, let e = self.entries[pkg] else { return }
-                    e.bigIcon = img
-                    self.schedule(pkg)
-                }
+                guard let self, let e = self.entries[pkg],
+                      let img = (r?["png"] as? String).flatMap({ Data(base64Encoded: $0) }).flatMap(NSImage.init(data:)) else { return }
+                e.bigIcon = img
+                self.schedule(pkg)
             }
         }
         schedule(pkg)
@@ -71,7 +69,7 @@ final class DockShims: NSObject {
         post("close", pkg)
     }
 
-    func focus(pkg: String) {
+    private func focus(pkg: String) {
         guard let w = entries[pkg]?.window else { return }
         if w.isMiniaturized { w.deminiaturize(nil) }
         w.makeKeyAndOrderFront(nil)
@@ -121,9 +119,9 @@ final class DockShims: NSObject {
         DispatchQueue.main.async {
             if self.expectedEnds.remove(id) != nil { return }
             // The user quit the shim, or it stopped. Close its window.
-            guard let (pkg, e) = self.entries.first(where: { Self.bundleID($0.key) == id }), e.running != nil else { return }
+            guard let e = self.entries.first(where: { Self.bundleID($0.key) == id })?.value, e.running != nil else { return }
             e.running = nil
-            self.entries[pkg]?.window?.close()
+            e.window?.close()
         }
     }
 
@@ -173,7 +171,7 @@ final class DockShims: NSObject {
         return s.trimmingCharacters(in: CharacterSet(charactersIn: "-."))
     }
 
-    static func bundleID(_ pkg: String) -> String { prefix + idPart(pkg) }
+    private static func bundleID(_ pkg: String) -> String { prefix + idPart(pkg) }
 
     private func schedule(_ pkg: String) {
         guard let e = entries[pkg] else { return }
@@ -301,7 +299,7 @@ final class DockShims: NSObject {
     // MARK: Icons
 
     /// Fits a phone app icon to the macOS icon grid (824 pt square in a 1024 pt canvas).
-    static func dockIcon(from src: NSImage, size: Int) -> NSImage {
+    private static func dockIcon(from src: NSImage, size: Int) -> NSImage {
         render(size: size) { rect in
             guard let cg = src.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
             let img = NSImage(cgImage: cg, size: .zero)
@@ -367,7 +365,7 @@ final class DockShims: NSObject {
         return (fill, scale)
     }
 
-    static func desktopIcon(size: Int, symbol: String = "rectangle.on.rectangle") -> NSImage {
+    private static func desktopIcon(size: Int, symbol: String = "rectangle.on.rectangle") -> NSImage {
         render(size: size) { rect in
             NSGradient(starting: NSColor(srgbRed: 0.35, green: 0.62, blue: 1, alpha: 1),
                        ending: NSColor(srgbRed: 0.04, green: 0.36, blue: 0.9, alpha: 1))?.draw(in: rect, angle: -90)

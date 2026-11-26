@@ -125,10 +125,7 @@ private struct RecentRow: View {
             if !entry.number.isEmpty {
                 Button("Call Back") { link.dial(entry.number) }
                 Button("Send Message") { Router.shared.compose(to: entry.number) }
-                Button("Copy Number") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(entry.number, forType: .string)
-                }
+                Button("Copy Number") { copyToPasteboard(entry.number) }
             }
         }
         .help(entry.date.formatted(date: .abbreviated, time: .shortened) + (entry.duration > 0 ? " · " + Duration.seconds(entry.duration).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated)) : ""))
@@ -199,10 +196,7 @@ private struct ContactRow: View {
         .contextMenu {
             Button("Call") { link.dial(contact.number) }
             Button("Send Message") { Router.shared.compose(to: contact.number) }
-            Button("Copy Number") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(contact.number, forType: .string)
-            }
+            Button("Copy Number") { copyToPasteboard(contact.number) }
         }
         .onTapGesture(count: 2) { link.dial(contact.number) }
     }

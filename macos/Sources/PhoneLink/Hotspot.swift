@@ -30,8 +30,6 @@ final class PhoneHotspot: ObservableObject {
     /// The hotspot of the paired phone. Nil until the shell helper reports it.
     @Published private(set) var network: Network?
     @Published private(set) var phase: Phase = .idle
-    /// Low Data Mode is on for the Wi-Fi network of the Mac. Set by PhoneLink.
-    @Published var lowDataMode = false
     /// Shows HotspotSheet in the main window.
     @Published var sheetShown = false
 
@@ -41,23 +39,15 @@ final class PhoneHotspot: ObservableObject {
     /// The time for the session to start after the Mac joins the hotspot.
     private static let sessionTimeout: TimeInterval = 30
 
-    private static var storeURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Phone Link", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o700])
-        return dir.appendingPathComponent("hotspot.json")
-    }
+    private static let store = SecretFile(name: "hotspot.json")
 
     private init() {
         if PhoneLink.isDemo {
             network = Network(ssid: "Galaxy S24 Ultra", password: nil)
             return
         }
-        if let d = try? Data(contentsOf: Self.storeURL) { network = try? JSONDecoder().decode(Network.self, from: d) }
+        network = Self.store.load(Network.self)
     }
-
-    var isBusy: Bool { phase == .joining || phase == .joined }
 
     /// The name that the phone shows for the hotspot. Samsung calls it Mobile Hotspot.
     static var term: String {
@@ -72,23 +62,13 @@ final class PhoneHotspot: ObservableObject {
         let n = Network(ssid: ssid, password: password?.isEmpty == true ? nil : password)
         guard n != network else { return }
         network = n
-        save()
+        Self.store.save(n)
     }
 
     func forget() {
         cancel()
         network = nil
-        save()
-    }
-
-    private func save() {
-        let url = Self.storeURL
-        if let n = network, let d = try? JSONEncoder().encode(n) {
-            try? d.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } else {
-            try? FileManager.default.removeItem(at: url)
-        }
+        Self.store.save(nil as Network?)
     }
 
     // MARK: Connect

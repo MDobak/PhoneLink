@@ -56,6 +56,8 @@ final class RemoteDesktopHost: NSObject, ObservableObject {
     private var encGeneration = 0
     private var encFps = 60
     private var lastBuffer: CVPixelBuffer?
+    /// The last picture was not encoded because the network was busy.
+    private var lastBufferSkipped = false
     private var lastFrameTime = Date.distantPast
     private var lastKeyTime = Date.distantPast
     private var keyWanted = true
@@ -66,10 +68,10 @@ final class RemoteDesktopHost: NSObject, ObservableObject {
     private var goodStats = 0
     private var autoQuality = true
 
-    // Send state (lock).
     private let sendLock = NSLock()
+    /// Frames given to the encoder and not sent yet. Guarded by sendLock.
     private var pendingSends = 0
-    /// After a dropped frame, send nothing until the next key frame.
+    /// After a dropped frame, send nothing until the next key frame. Send queue only.
     private var waitForKey = false
 
     private override init() {
@@ -116,7 +118,7 @@ final class RemoteDesktopHost: NSObject, ObservableObject {
         if m != missing { missing = m }
     }
 
-    static func missingPermissions() -> [String] {
+    private static func missingPermissions() -> [String] {
         var m: [String] = []
         if !CGPreflightScreenCaptureAccess() { m.append("screenRecording") }
         if !(CGPreflightPostEventAccess() || AXIsProcessTrusted()) { m.append("accessibility") }
@@ -288,6 +290,7 @@ final class RemoteDesktopHost: NSObject, ObservableObject {
             self.encoder?.invalidate()
             self.encoder = nil
             self.lastBuffer = nil
+            self.lastBufferSkipped = false
         }
         releaseAssertions()
         DispatchQueue.main.async { self.active = false }
@@ -319,7 +322,7 @@ final class RemoteDesktopHost: NSObject, ObservableObject {
         }
     }
 
-    static var isLocked: Bool {
+    private static var isLocked: Bool {
         guard let d = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
         return (d["CGSSessionScreenIsLocked"] as? Bool) == true
     }
@@ -394,6 +397,7 @@ extension RemoteDesktopHost: SCStreamOutput, SCStreamDelegate {
         encoder?.invalidate()
         encoder = nil
         lastBuffer = nil
+        lastBufferSkipped = false
         keyWanted = true
         if keepAlive == nil {
             let t = DispatchSource.makeTimerSource(queue: captureQueue)
@@ -405,7 +409,8 @@ extension RemoteDesktopHost: SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, sb.isValid else { return }
+        // Frames can still arrive after a stop. keepAlive exists only while a session runs.
+        guard type == .screen, sb.isValid, keepAlive != nil else { return }
         // Idle and blank frames have no new picture.
         if let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
            let raw = atts.first?[.status] as? Int, let status = SCFrameStatus(rawValue: raw), status != .complete { return }
@@ -420,10 +425,11 @@ extension RemoteDesktopHost: SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// Every 250 ms: if the screen is static, resend the last picture as a key frame when the phone needs one, and at least every 10 s.
+    /// Every 250 ms: if the screen is static, encode the last picture again when it was skipped,
+    /// when the phone needs a key frame, and at least every 10 s.
     private func keepAliveTick() {
         guard let pb = lastBuffer, Date().timeIntervalSince(lastFrameTime) > 0.2 else { return }
-        if keyWanted || Date().timeIntervalSince(lastKeyTime) > 10 {
+        if lastBufferSkipped || keyWanted || Date().timeIntervalSince(lastKeyTime) > 10 {
             encode(pb, pts: CMClockGetTime(CMClockGetHostTimeClock()))
         }
     }
@@ -432,6 +438,7 @@ extension RemoteDesktopHost: SCStreamOutput, SCStreamDelegate {
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         lastBuffer = pb
         lastFrameTime = Date()
+        lastBufferSkipped = true
         // Do not let frames queue before the network. Skipping an unencoded frame does not break the decoder.
         sendLock.lock()
         let busy = pendingSends > 3
@@ -454,6 +461,7 @@ extension RemoteDesktopHost: SCStreamOutput, SCStreamDelegate {
             encoder?.requestKeyFrame()
         }
         sendLock.lock(); pendingSends += 1; sendLock.unlock()
+        lastBufferSkipped = false
         encoder?.encode(pb, pts: pts)
     }
 
@@ -461,7 +469,7 @@ extension RemoteDesktopHost: SCStreamOutput, SCStreamDelegate {
         sendQueue.async {
             self.sendLock.lock(); self.pendingSends = max(0, self.pendingSends - 1); self.sendLock.unlock()
             for u in units {
-                if u.flags & 2 != 0 || u.flags & 1 != 0 { self.waitForKey = false }
+                if u.flags != 0 { self.waitForKey = false }
                 if self.waitForKey { continue }
                 if !PhoneLink.shared.sendRemoteVideo(flags: u.flags, ptsUs: u.ptsUs, data: u.data) {
                     self.waitForKey = true
@@ -762,3 +770,4 @@ extension RemoteDesktopHost {
         }
     }
 }
+

@@ -7,11 +7,10 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.ConnectivityManager
-import android.os.Build
 import android.content.pm.PackageManager
-import android.graphics.Typeface
+import android.net.ConnectivityManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
@@ -41,6 +40,10 @@ class MainActivity : UiActivity() {
         Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS,
         Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE, Manifest.permission.READ_PHONE_STATE,
         Manifest.permission.READ_CALL_LOG, Manifest.permission.ANSWER_PHONE_CALLS, Manifest.permission.POST_NOTIFICATIONS,
+    )
+
+    private val agentPerms = arrayOf(
+        Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR, Manifest.permission.WRITE_CONTACTS,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -189,6 +192,21 @@ class MainActivity : UiActivity() {
         access.addView(row(R.drawable.ic_battery, "Background use", "Stay connected when the screen is off",
             check(LinkService.ignoringBatteryOptimizations(this), "Allow") { startActivity(LinkService.batteryIntent(this)) }))
 
+        // Only agents on the Mac (MCP tools) use these. The Mac app has its own switches for each tool.
+        val agents = section("Agents on your Mac")
+        agents.addView(row(R.drawable.ic_calendar, "Contacts and calendar", "Agents can read and change contacts and events",
+            check(agentPerms.all { has(it) }, "Allow") { requestPermissions(agentPerms, 6) }))
+        agents.addView(divider())
+        val fine = has(Manifest.permission.ACCESS_FINE_LOCATION)
+        val always = fine && has(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        agents.addView(row(R.drawable.ic_location, "Location",
+            if (fine && !always) "Select Allow all the time" else "Agents can ask where the phone is",
+            check(always, "Allow") {
+                // Android asks for background location only after the app has location while in use.
+                if (!fine) requestPermissions(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION), 7)
+                else requestPermissions(arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION), 8)
+            }))
+
         val macs = section("Paired Macs")
         val list = Pairings.list(this)
         list.forEachIndexed { i, (id, name) ->
@@ -242,8 +260,7 @@ class MainActivity : UiActivity() {
             setPadding(dp(24), dp(8), dp(24), 0)
         }
         body.addView(label("Check that your Mac shows the same code.", 15f, R.color.on_surface_variant))
-        body.addView(label(req.sas.substring(0, 3) + " " + req.sas.substring(3), 40f).apply {
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        body.addView(label(req.sas.substring(0, 3) + " " + req.sas.substring(3), 40f, medium = true).apply {
             fontFeatureSettings = "tnum"
             letterSpacing = 0.06f
             gravity = Gravity.CENTER

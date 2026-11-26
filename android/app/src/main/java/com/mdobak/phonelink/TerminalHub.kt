@@ -13,7 +13,7 @@ import org.json.JSONObject
  */
 object TerminalHub : TerminalSessionClient {
     const val MAX_TABS = 8
-    const val SCROLLBACK = 10_000
+    private const val SCROLLBACK = 10_000
     private const val TAG = "TerminalHub"
 
     class Tab(val id: Int) {
@@ -50,8 +50,7 @@ object TerminalHub : TerminalSessionClient {
         private set
     var askedAt = 0L
         private set
-    var ui: Ui? = null
-        private set
+    private var ui: Ui? = null
     var currentId = 0
 
     private var listed = false
@@ -119,7 +118,7 @@ object TerminalHub : TerminalSessionClient {
     }
 
     /** After a reconnect, asks the Mac for the shells that are still open. */
-    fun sync() {
+    private fun sync() {
         val s = Hub.session
         if (s !== linked) {
             resetLink()
@@ -205,11 +204,12 @@ object TerminalHub : TerminalSessionClient {
     }
 
     private fun markExited(t: Tab, code: Int?, message: String?) {
-        t.exitCode = code ?: -1
+        val exitCode = code ?: -1
+        t.exitCode = exitCode
         t.exitMessage = message
         t.opened = false
         t.openSent = false
-        t.session.setExited(t.exitCode!!)
+        t.session.setExited(exitCode)
         val line = StringBuilder("\r\n\u001b[0m\u001b[2m")
         if (message != null) line.append(message).append(' ')
         line.append(if (code != null && code >= 0) "[Process exited (code $code)]" else "[Process exited]")

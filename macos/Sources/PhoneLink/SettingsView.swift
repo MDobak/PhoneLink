@@ -2,6 +2,9 @@ import ServiceManagement
 import SwiftUI
 
 struct SettingsView: View {
+    /// The tab tags, in order.
+    static let tabs = ["general", "phone", "controls", "files", "screen", "remote", "agents", "debugging"]
+
     @AppStorage("settingsTab") private var tab = "general"
     /// Demo only: PHONELINK_DEMO_SETTINGS_HEIGHT=n makes the window n points high, so that a capture shows all rows of a tab.
     private static let demoHeight: CGFloat? = PhoneLink.isDemo
@@ -15,12 +18,17 @@ struct SettingsView: View {
             FileSettings().tabItem { Label("Files", systemImage: "folder") }.tag("files")
             ScreenSettings().tabItem { Label("Screen", systemImage: "rectangle.portrait.on.rectangle.portrait") }.tag("screen")
             RemoteAccessSettings().tabItem { Label("Remote Access", systemImage: "macbook.and.iphone") }.tag("remote")
-            // The tag stays "debugging", so that saved selections and phonelink://settings/debugging still work.
+            AgentsSettings().tabItem { Label("Agents", systemImage: "sparkles") }.tag("agents")
+            // Saved settings and phonelink://settings/debugging use the tag "debugging".
             DebugSettings().tabItem { Label("Connections", systemImage: "point.3.connected.trianglepath.dotted") }.tag("debugging")
         }
-        .frame(width: 500)
+        // Narrower, the last tabs move into the toolbar overflow menu.
+        .frame(width: 720)
         .frame(height: Self.demoHeight)
-        .onAppear { PhoneLink.shared.checkStatusAgain {} }
+        .onAppear {
+            if !Self.tabs.contains(tab) { tab = "general" }
+            PhoneLink.shared.checkStatusAgain {}
+        }
     }
 }
 

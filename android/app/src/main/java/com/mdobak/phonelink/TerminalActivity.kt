@@ -20,6 +20,7 @@ import android.text.TextUtils
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -31,6 +32,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ProgressBar
@@ -254,7 +256,7 @@ class TerminalActivity : UiActivity(), TerminalHub.Ui, TerminalViewClient {
                 when (e.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         v.isPressed = true
-                        v.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                         extraKey(k)
                         val r = object : Runnable { override fun run() { extraKey(k); handler.postDelayed(this, 60) } }
                         repeat = r
@@ -270,7 +272,7 @@ class TerminalActivity : UiActivity(), TerminalHub.Ui, TerminalViewClient {
             }
         } else {
             setOnClickListener { v ->
-                v.performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 extraKey(k)
             }
         }
@@ -299,8 +301,7 @@ class TerminalActivity : UiActivity(), TerminalHub.Ui, TerminalViewClient {
                         switchTab(if (dx < 0) 1 else -1)
                     }
                 }
-                MotionEvent.ACTION_POINTER_UP -> tracking = false
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> tracking = false
+                MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> tracking = false
             }
             return fired
         }
@@ -377,7 +378,7 @@ class TerminalActivity : UiActivity(), TerminalHub.Ui, TerminalViewClient {
         val i = list.indexOfFirst { it.id == TerminalHub.currentId }
         val n = (i + delta).coerceIn(0, list.size - 1)
         if (n != i) {
-            term.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+            term.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
             select(list[n])
         }
     }
@@ -462,7 +463,7 @@ class TerminalActivity : UiActivity(), TerminalHub.Ui, TerminalViewClient {
             setImageResource(R.drawable.ic_close)
             imageTintList = ColorStateList.valueOf(color(R.color.on_primary_container))
             background = RippleDrawable(ColorStateList.valueOf(color(R.color.outline)), null, rounded(R.color.surface, 14))
-            scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
             setPadding(dp(5), dp(5), dp(5), dp(5))
             contentDescription = "Close tab"
             setOnClickListener { closeTab(t, ask = true) }
@@ -654,7 +655,7 @@ class TerminalActivity : UiActivity(), TerminalHub.Ui, TerminalViewClient {
             .setTitle("Open link?")
             .setMessage(full)
             .setPositiveButton("Open") { _, _ ->
-                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(full))) } catch (e: Exception) { toast("No app can open this link.") }
+                try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(full))) } catch (_: Exception) { toast("No app can open this link.") }
             }
             .setNegativeButton("Cancel", null)
             .show()

@@ -13,7 +13,7 @@ class RemoteKeyboard(
     private val modsChanged: () -> Unit,
 ) {
     private val modNames = arrayOf("cmd", "opt", "ctrl", "shift")
-    private val modCodes = intArrayOf(55, 58, 59, 56)
+    private val modCodes = intArrayOf(MacKeys.COMMAND, MacKeys.OPTION, MacKeys.CONTROL, MacKeys.SHIFT)
     /** 0 = off, 1 = one time, 2 = locked. */
     private val modState = IntArray(4)
     private val modTapT = LongArray(4)
@@ -105,7 +105,7 @@ class RemoteKeyboard(
     }
 
     /** With a modifier on, each character goes as a key (for example Command-C). */
-    fun typeText(s: String) {
+    private fun typeText(s: String) {
         if (!live() || s.isEmpty()) return
         val mods = activeMods()
         if (mods.isNotEmpty()) {

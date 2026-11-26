@@ -39,7 +39,7 @@ final class AudioDevices: ObservableObject {
     }
 
     /// Nil for the system default or a disconnected device.
-    static func id(forUID uid: String?, input: Bool) -> AudioDeviceID? {
+    private static func id(forUID uid: String?, input: Bool) -> AudioDeviceID? {
         guard let uid, !uid.isEmpty else { return nil }
         let scope = input ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput
         return deviceIDs().first { string($0, kAudioDevicePropertyDeviceUID) == uid && channels($0, scope) > 0 }

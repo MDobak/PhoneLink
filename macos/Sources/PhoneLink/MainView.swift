@@ -87,7 +87,6 @@ private struct Sidebar: View {
 
     var body: some View {
         List(selection: Binding(get: { router.section }, set: { if let s = $0 { router.section = s } })) {
-            // Only the sections that the phone can serve now show (see PhoneLink.shows(_:)).
             ForEach(visible, id: \.self) { s in
                 Label(s.title, systemImage: s.symbol).badge(badge(s)).tag(s)
             }
@@ -98,17 +97,17 @@ private struct Sidebar: View {
         // A drop on any part of the sidebar pins the app at the end of the list.
         .onDrop(of: [.plainText], isTargeted: nil) { providers in
             guard link.shows(.appWindows) else { return false }
-            return PinnedApps.shared.accept(providers)
+            return pins.accept(providers)
         }
-        .onChange(of: visible) { _, v in if !v.contains(router.section), let first = v.first { router.section = first } }
-        .onAppear { if !visible.contains(router.section), let first = visible.first { router.section = first } }
+        .onChange(of: visible) { _, v in keepSelection(in: v) }
+        .onAppear { keepSelection(in: visible) }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom, spacing: 0) { DeviceFooter() }
     }
 }
 
 extension Sidebar {
-    /// Apps and Device need USB or Wireless debugging.
+    /// The sections that the phone can serve now.
     var visible: [SidebarSection] {
         var v: [SidebarSection] = []
         if link.shows(.messages) { v.append(.messages) }
@@ -120,6 +119,10 @@ extension Sidebar {
         if link.shows(.apps) { v.append(.apps) }
         if link.shows(.deviceInfo) { v.append(.device) }
         return v
+    }
+
+    func keepSelection(in sections: [SidebarSection]) {
+        if !sections.contains(router.section), let first = sections.first { router.section = first }
     }
 
     /// Zero shows no badge.

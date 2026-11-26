@@ -6,12 +6,12 @@ import SwiftUI
 final class CallPanelController {
     static let shared = CallPanelController()
     private var panel: NSPanel?
-    private var bag: AnyCancellable?
+    private var subscription: AnyCancellable?
     /// The end of a hide animation checks this, so a new call keeps its panel.
     private var visible = false
 
     func start() {
-        bag = PhoneLink.shared.$call
+        subscription = PhoneLink.shared.$call
             .map { $0 != nil }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)

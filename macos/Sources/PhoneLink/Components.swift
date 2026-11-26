@@ -86,6 +86,11 @@ func appDisplayName(_ app: String, pkg: String) -> String {
     return last.prefix(1).uppercased() + last.dropFirst()
 }
 
+func copyToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+}
+
 func listDate(_ d: Date) -> String {
     let cal = Calendar.current
     if cal.isDateInToday(d) { return d.formatted(date: .omitted, time: .shortened) }

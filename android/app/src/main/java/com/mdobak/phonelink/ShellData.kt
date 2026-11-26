@@ -44,12 +44,6 @@ object ShellData {
         }
     }
 
-    private fun setting(table: String, name: String): String? = try {
-        cr.query(Uri.parse("content://settings/$table"), arrayOf("value"), "name=?", arrayOf(name), null)?.use { c ->
-            if (c.moveToFirst()) c.getString(0) else null
-        }
-    } catch (_: Exception) { null }
-
     // Same fields as LinkService.status(). "perms" lists what the shell user can do.
     fun status(): JSONObject {
         val b = try { run("dumpsys", "battery") } catch (_: Exception) { "" }
@@ -60,7 +54,7 @@ object ShellData {
         val notifs = try { active(); true } catch (_: Throwable) { false }
         return json(
             "t" to "status",
-            "name" to (setting("global", "device_name")?.takeIf { it.isNotBlank() } ?: Build.MODEL),
+            "name" to (Shell.setting("global", "device_name")?.takeIf { it.isNotBlank() } ?: Build.MODEL),
             "model" to Build.MODEL,
             "battery" to level,
             "charging" to plugged,
@@ -363,7 +357,9 @@ object ShellData {
         var tick = 0
         while (true) {
             try {
-                if (notifWatch) known = pollNotifs(known) else known = null
+                // Notifications every 2 s, messages every 3 s.
+                if (!notifWatch) known = null
+                else if (known == null || tick % 2 == 0) known = pollNotifs(known)
                 if (smsWatch && tick % 3 == 0) {
                     if (lastSms < 0) { lastSms = maxId(SMS); lastMms = maxId(MMS) }
                     else { lastSms = pollSms(lastSms); lastMms = pollMms(lastMms, waitingMms) }
@@ -374,11 +370,8 @@ object ShellData {
         }
     }
 
-    private var notifTick = 0
-
-    // The first poll only records the current set; the Mac gets those with notif.list. Runs every 2 s.
+    // The first poll only records the current set. The Mac gets those with notif.list.
     private fun pollNotifs(old: HashMap<String, Long>?): HashMap<String, Long> {
-        if (old != null && notifTick++ % 2 != 0) return old
         val now = HashMap<String, Long>()
         for (s in active()) {
             if (!wanted(s)) continue
@@ -458,7 +451,7 @@ object ShellData {
     }
 
     private fun source(p: MediaPlayer) {
-        val uri = setting("system", "ringtone")?.takeIf { it.startsWith("content://") }
+        val uri = Shell.setting("system", "ringtone")?.takeIf { it.startsWith("content://") }
         if (uri != null) {
             try {
                 cr.openAssetFileDescriptor(Uri.parse(uri), "r")?.use { afd ->

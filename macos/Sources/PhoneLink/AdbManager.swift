@@ -45,7 +45,7 @@ final class AdbManager: ObservableObject {
 
     init() { findAdb() }
 
-    static let defaultPaths = ["/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/opt/local/bin/adb",
+    private static let defaultPaths = ["/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/opt/local/bin/adb",
                                NSHomeDirectory() + "/Library/Android/sdk/platform-tools/adb",
                                NSHomeDirectory() + "/platform-tools/adb"]
 
@@ -85,32 +85,19 @@ final class AdbManager: ObservableObject {
 
     struct Result { let status: Int32; let output: String }
 
-    /// Output goes to a file because an adb server started by adb keeps a pipe open.
+    /// Blocks; do not call on the main thread. Returns nil if adb did not start or timed out.
     @discardableResult
     static func run(_ args: [String], timeout: TimeInterval = 15) -> Result? {
-        guard let adb = path else { return nil }
-        let out = FileManager.default.temporaryDirectory.appendingPathComponent("phonelink-adb-" + UUID().uuidString)
-        guard FileManager.default.createFile(atPath: out.path, contents: nil), let h = try? FileHandle(forWritingTo: out) else { return nil }
-        defer { try? h.close(); try? FileManager.default.removeItem(at: out) }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: adb)
-        p.arguments = args
-        p.standardOutput = h
-        p.standardError = h
-        p.standardInput = FileHandle.nullDevice
-        let done = DispatchSemaphore(value: 0)
-        p.terminationHandler = { _ in done.signal() }
-        do { try p.run() } catch { return nil }
-        if done.wait(timeout: .now() + timeout) == .timedOut {
-            p.terminate()
-            return nil
-        }
-        let text = (try? String(contentsOf: out, encoding: .utf8)) ?? ""
-        return Result(status: p.terminationStatus, output: text)
+        AdbProcess().run(args, timeout: timeout)
     }
 
     static func shell(_ serial: String, _ args: [String], timeout: TimeInterval = 15) -> Result? {
         run(["-s", serial, "shell"] + args, timeout: timeout)
+    }
+
+    /// Quotes one argument for the phone shell.
+    static func quote(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     static func listDevices() -> [AdbDevice] {
@@ -145,22 +132,6 @@ final class AdbManager: ObservableObject {
     /// ro.serialno of the last session's phone, used to reach it over adb while the session is down.
     /// Safe because the session handshake only accepts the paired phone.
     static var pairedPhoneID: String? { UserDefaults.standard.string(forKey: "pairedPhoneID") }
-
-    func pairedPhoneSerial(done: @escaping (String?) -> Void) {
-        queue.async {
-            var found: String?
-            if Self.path != nil, let want = Self.pairedPhoneID, !want.isEmpty {
-                let list = Self.listDevices().filter { $0.state == .ready }
-                for d in list.sorted(by: { $0.usb && !$1.usb }) {
-                    if d.serial == want || d.serial.hasPrefix("adb-\(want)-") { found = d.serial; break }
-                    let s = self.serialNumbers[d.serial] ?? Self.serialNumber(d.serial)
-                    if let s { self.serialNumbers[d.serial] = s }
-                    if s == want { found = d.serial; break }
-                }
-            }
-            DispatchQueue.main.async { done(found) }
-        }
-    }
 
     func sessionEnded() {
         queue.async { self.token = nil; self.verified = [:]; self.rejected = [:] }
@@ -221,7 +192,6 @@ final class AdbManager: ObservableObject {
         }
     }
 
-    /// ro.serialno, because the adb serial of a wireless debugging connection changes.
     /// Moves the local ends of adb forwards, so that a second copy of the app (the screenshot tool) can run beside the first.
     static let portOffset = UInt16(ProcessInfo.processInfo.environment["PHONELINK_ADB_PORT_OFFSET"] ?? "") ?? 0
 
@@ -230,6 +200,7 @@ final class AdbManager: ObservableObject {
     static var directPhoneModel: String { UserDefaults.standard.string(forKey: "directPhoneModel") ?? "" }
     static var directPhoneName: String? { UserDefaults.standard.string(forKey: "directPhoneName") }
 
+    /// adb serial -> ro.serialno. The adb serial of a wireless debugging connection changes. On queue.
     private var serialNumbers: [String: String] = [:]
     private var lastDirectConnect = Date.distantPast
 
@@ -264,7 +235,7 @@ final class AdbManager: ObservableObject {
         return match(list)
     }
 
-    static func serialNumber(_ serial: String) -> String? {
+    private static func serialNumber(_ serial: String) -> String? {
         guard let out = shell(serial, ["getprop", "ro.serialno"], timeout: 6), out.status == 0 else { return nil }
         let s = out.output.trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? nil : s
@@ -295,7 +266,7 @@ final class AdbManager: ObservableObject {
         PhoneLink.shared.directPhoneChanged()
     }
 
-    static let remoteApk = "/data/local/tmp/phonelink.apk"
+    private static let remoteApk = "/data/local/tmp/phonelink.apk"
     private static let apkLock = NSLock()
     private static var pushedApk: [String: String] = [:]
     private static let bundledApk: (url: URL, size: Int, sha: String)? = {
@@ -607,8 +578,7 @@ final class AdbManager: ObservableObject {
         }
         for c in cmds {
             // "adb shell" joins arguments with spaces, so quote each one.
-            let quoted = c.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
-            guard let r = shell(serial, [quoted]) else { return "The phone did not answer." }
+            guard let r = shell(serial, [c.map(quote).joined(separator: " ")]) else { return "The phone did not answer." }
             let out = r.output.trimmingCharacters(in: .whitespacesAndNewlines)
             if r.status != 0 || out.contains("Exception") || out.hasPrefix("Error") {
                 if out.contains("SecurityException") || out.contains("not allowed") {
@@ -618,5 +588,60 @@ final class AdbManager: ObservableObject {
             }
         }
         return nil
+    }
+}
+
+/// A cancellable adb command. Share one instance across the steps of a transfer:
+/// after cancel(), the running step stops and later steps do not start.
+final class AdbProcess {
+    private let lock = NSLock()
+    private var process: Process?
+    private var stopped = false
+
+    var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+
+    func cancel() {
+        lock.lock()
+        stopped = true
+        let p = process
+        lock.unlock()
+        if let p, p.isRunning { p.terminate() }
+    }
+
+    /// Call off the main thread. tick runs every interval seconds for progress.
+    /// Returns nil if adb did not start, timed out or was cancelled.
+    func run(_ args: [String], timeout: TimeInterval? = nil, interval: TimeInterval = 0.25,
+             tick: (() -> Void)? = nil) -> AdbManager.Result? {
+        guard let adb = AdbManager.path else { return nil }
+        // Output goes to a file because an adb server started by adb keeps a pipe open.
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("phonelink-adb-" + UUID().uuidString)
+        guard FileManager.default.createFile(atPath: out.path, contents: nil),
+              let h = try? FileHandle(forWritingTo: out) else { return nil }
+        defer { try? h.close(); try? FileManager.default.removeItem(at: out) }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: adb)
+        p.arguments = args
+        p.standardOutput = h
+        p.standardError = h
+        p.standardInput = FileHandle.nullDevice
+        let done = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in done.signal() }
+
+        lock.lock()
+        if stopped { lock.unlock(); return nil }
+        do { try p.run() } catch { lock.unlock(); return nil }
+        process = p
+        lock.unlock()
+
+        let end = timeout.map { Date().addingTimeInterval($0) }
+        var timedOut = false
+        while done.wait(timeout: .now() + interval) == .timedOut {
+            if let end, Date() > end { timedOut = true; p.terminate(); done.wait(); break }
+            tick?()
+        }
+        lock.lock(); process = nil; lock.unlock()
+        if timedOut || cancelled { return nil }
+        let text = (try? String(contentsOf: out, encoding: .utf8)) ?? ""
+        return AdbManager.Result(status: p.terminationStatus, output: text)
     }
 }

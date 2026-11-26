@@ -11,8 +11,6 @@ enum LinkKind: String {
     case usb
     /// An L2CAP channel.
     case bluetooth
-
-    var isCable: Bool { self == .adb || self == .usb }
 }
 
 enum TransportEvent {
@@ -27,7 +25,7 @@ protocol LinkTransport: AnyObject {
     func start(on queue: DispatchQueue, events: @escaping (TransportEvent) -> Void)
     /// Reads exactly n bytes (n > 0). Gives nil after an error or at the end of the stream (eof true).
     func receive(_ n: Int, done: @escaping (_ data: Data?, _ eof: Bool) -> Void)
-    /// sent runs when the transport took the data.
+    /// sent runs when the transport took the data, or when the transport ended without it. File transfers wait for it.
     func send(_ data: Data, sent: (() -> Void)?)
     func cancel()
 }

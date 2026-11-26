@@ -3,6 +3,10 @@
 set -e
 cd "$(dirname "$0")"
 swift build -c release --arch arm64
+# A stable signature keeps the macOS permissions (Accessibility, Screen Recording) after each build.
+# tools/make-signing-cert.sh makes the certificate. Without it, the app gets an ad hoc signature.
+SIGN="Phone Link Dev"
+security find-certificate -c "$SIGN" >/dev/null 2>&1 || { SIGN=-; echo "warning: no \"Phone Link Dev\" certificate; macOS asks for the permissions again after each build" >&2; }
 APP="build/Phone Link.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -10,7 +14,9 @@ cp .build/release/PhoneLink "$APP/Contents/MacOS/PhoneLink"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Helpers"
 cp .build/release/PhoneLinkDockShim "$APP/Contents/Helpers/PhoneLinkDockShim"
-codesign --force --sign - "$APP/Contents/Helpers/PhoneLinkDockShim"
+codesign --force --sign "$SIGN" "$APP/Contents/Helpers/PhoneLinkDockShim"
+cp .build/release/PhoneLinkMCP "$APP/Contents/Helpers/phonelink-mcp"
+codesign --force --sign "$SIGN" "$APP/Contents/Helpers/phonelink-mcp"
 if [ ! -f build/AppIcon.icns ] || [ tools/make-icon.swift -nt build/AppIcon.icns ]; then
   rm -rf build/AppIcon.iconset
   swift tools/make-icon.swift build/AppIcon.iconset
@@ -42,5 +48,5 @@ if xcrun --find appintentsmetadataprocessor >/dev/null 2>&1; then
     --target-triple arm64-apple-macos14.0 --source-file-list "$META/sources.txt" --swift-const-vals-list "$META/constvals.txt" \
     --binary-file "$APP/Contents/MacOS/PhoneLink" --force 2>&1 | grep -iE "error|warning" || true
 fi
-codesign --force --sign - "$APP"
+codesign --force --sign "$SIGN" "$APP"
 echo "Built $APP"

@@ -12,6 +12,7 @@ enum Aoa {
     static let readyMarker = Data("PLNKRDY1".utf8)
     static let strings = ["Phone Link", "Mac", "Phone Link for Mac", "1", "", "phonelink"]
     static let settingKey = "usbAccessory"
+    static var isOn: Bool { UserDefaults.standard.object(forKey: settingKey) as? Bool ?? true }
     /// The Android Open Accessory product IDs (Google vendor ID 0x18D1).
     static func isAccessory(vid: UInt16, pid: UInt16) -> Bool { vid == 0x18D1 && (0x2D00...0x2D05).contains(pid) }
     /// Vendors of Android phones. Other devices do not get the AOA requests.
@@ -88,10 +89,11 @@ final class AoaTransport: LinkTransport {
             queue.async { self.received(d) }
         }
         buf.deallocate()
-        writer.sync {}
         lock.lock()
         stream = nil
         lock.unlock()
+        // Wait for a write that took the stream before it was cleared.
+        writer.sync {}
         pu_close(s)
         finish()
     }
@@ -162,12 +164,8 @@ final class AoaTransport: LinkTransport {
             lock.lock()
             let s = cancelled ? nil : stream
             lock.unlock()
-            guard let s else { return }
-            let r = data.withUnsafeBytes { pu_write(s, $0.baseAddress, UInt32($0.count)) }
-            if r != 0 {
-                queue.async { self.end("The USB connection was interrupted.") }
-                return
-            }
+            let r = s.map { s in data.withUnsafeBytes { pu_write(s, $0.baseAddress, UInt32($0.count)) } }
+            if let r, r != 0 { queue.async { self.end("The USB connection was interrupted.") } }
             if let sent { queue.async { sent() } }
         }
     }

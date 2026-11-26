@@ -2,8 +2,6 @@ import AppIntents
 import AppKit
 import CoreSpotlight
 
-// Shortcuts actions wait a short time for the phone to connect.
-
 enum IntentError: Error, CustomLocalizedStringResourceConvertible {
     case notConnected, noNumber, badLink
     case unavailable(String)
@@ -17,6 +15,7 @@ enum IntentError: Error, CustomLocalizedStringResourceConvertible {
     }
 }
 
+/// Shortcuts actions wait up to 10 s for the phone to connect.
 @MainActor
 private func connectedLink(for feature: PhoneFeature) async throws -> PhoneLink {
     let link = PhoneLink.shared
@@ -231,7 +230,7 @@ enum URLRouter {
         case "find":
             if PhoneLink.shared.state == .connected { PhoneLink.shared.ring() }
         case "messages" where v("thread") != nil:
-            Router.shared.show(.messages, thread: Int64(v("thread")!))
+            Router.shared.show(.messages, thread: v("thread").flatMap { Int64($0) })
         case let h? where SidebarSection(rawValue: h) != nil:
             if h == "phone", v("view") == "recents" { Router.shared.phoneRecents = true }
             Router.shared.show(SidebarSection(rawValue: h))

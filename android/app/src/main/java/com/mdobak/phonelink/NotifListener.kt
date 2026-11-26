@@ -21,6 +21,7 @@ import java.io.ByteArrayOutputStream
 class NotifListener : NotificationListenerService() {
     companion object {
         @Volatile var instance: NotifListener? = null
+            private set
 
         // System notifications the phone does not list, e.g. the Samsung "ongoing activity" item (Now Bar):
         // it has a special extra, or its only text is its channel name.
@@ -29,11 +30,29 @@ class NotifListener : NotificationListenerService() {
             return text.isNullOrBlank() && title != null && title == channelId
         }
 
-        fun activeJson(s: Session): JSONArray {
+        /** s: the session that gets the app icons, or null for no icons. all: also ongoing and system notifications.
+         *  agent: also the chat messages of the notification. */
+        fun activeJson(s: Session?, all: Boolean = false, agent: Boolean = false): JSONArray {
             val l = instance ?: return JSONArray()
             val a = JSONArray()
-            l.activeNotifications.orEmpty().filter { l.wanted(it) }.sortedBy { it.postTime }.forEach { a.put(l.toJson(it, s)) }
+            l.activeNotifications.orEmpty().filter { if (all) it.packageName != l.packageName else l.wanted(it) }
+                .sortedBy { it.postTime }.forEach { a.put(l.toJson(it, s, agent)) }
             return a
+        }
+
+        /** The last messages of a chat notification (MessagingStyle), the oldest first. */
+        private fun messages(n: Notification): JSONArray? {
+            @Suppress("DEPRECATION")
+            val arr = n.extras.getParcelableArray(Notification.EXTRA_MESSAGES) ?: return null
+            val list = try { Notification.MessagingStyle.Message.getMessagesFromBundleArray(arr) } catch (_: Exception) { return null }
+            if (list.isEmpty()) return null
+            val out = JSONArray()
+            for (m in list.takeLast(10)) {
+                @Suppress("DEPRECATION")
+                val from = m.senderPerson?.name ?: m.sender
+                out.put(json("from" to from?.toString(), "text" to m.text?.toString(), "time" to m.timestamp))
+            }
+            return out
         }
 
         // Android can leave the listener unbound after an app update or after the system stops it.
@@ -79,18 +98,19 @@ class NotifListener : NotificationListenerService() {
         }
     }
 
-    override fun onListenerConnected() { instance = this; Media.start(this); Hub.changed() }
+    override fun onListenerConnected() { instance = this; Media.start(this); Hub.permsChanged() }
     override fun onListenerDisconnected() {
         instance = null
         Media.stop()
-        Hub.changed()
+        Hub.permsChanged()
         // Android can disconnect the listener (e.g. on low memory). Ask to connect again.
         rebind(this)
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val s = Hub.session ?: return
         if (!wanted(sbn)) return
+        if (NotifHistory.isOn(this)) NotifHistory.record(this, toJson(sbn, null, true).apply { remove("actions"); remove("icon"); remove("silent") })
+        val s = Hub.session ?: return
         s.send(json("t" to "notif.posted", "n" to toJson(sbn, s)))
     }
 
@@ -98,7 +118,7 @@ class NotifListener : NotificationListenerService() {
         Hub.send(json("t" to "notif.removed", "key" to sbn.key))
     }
 
-    fun wanted(sbn: StatusBarNotification): Boolean {
+    private fun wanted(sbn: StatusBarNotification): Boolean {
         val n = sbn.notification
         if (sbn.packageName == packageName) return false
         if (sbn.isOngoing || n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return false
@@ -124,7 +144,7 @@ class NotifListener : NotificationListenerService() {
         Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     } catch (_: Exception) { null }
 
-    fun toJson(sbn: StatusBarNotification, s: Session): JSONObject {
+    private fun toJson(sbn: StatusBarNotification, s: Session?, agent: Boolean = false): JSONObject {
         val n = sbn.notification
         val e = n.extras
         val big = e.getCharSequence(Notification.EXTRA_BIG_TEXT)
@@ -143,8 +163,13 @@ class NotifListener : NotificationListenerService() {
             "time" to sbn.postTime,
             "silent" to (n.flags and Notification.FLAG_ONLY_ALERT_ONCE != 0),
             "actions" to actions,
-            "icon" to if (s.firstIcon(sbn.packageName)) iconPng(sbn.packageName) else null,
-        )
+            "icon" to if (s?.firstIcon(sbn.packageName) == true) iconPng(sbn.packageName) else null,
+        ).also { o ->
+            if (agent) {
+                e.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.let { o.put("conversation", it.toString()) }
+                messages(n)?.let { o.put("messages", it) }
+            }
+        }
     }
 
     fun dismiss(key: String) = cancelNotification(key)

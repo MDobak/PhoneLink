@@ -142,5 +142,4 @@ abstract class UiActivity : Activity() {
             contentDescription = "On"
             layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
         } else tonalButton(action, onClick)
-
 }

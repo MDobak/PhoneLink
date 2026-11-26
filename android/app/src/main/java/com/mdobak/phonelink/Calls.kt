@@ -3,17 +3,18 @@ package com.mdobak.phonelink
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
-import android.provider.CallLog
-import org.json.JSONArray
 import android.os.Handler
 import android.os.Looper
+import android.provider.CallLog
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Android gives cellular call audio only to the system, so call audio stays on the phone. */
 object Calls {
+    private val main = Handler(Looper.getMainLooper())
     @Volatile var current: JSONObject? = null
         private set
     private var listener: PhoneStateListener? = null
@@ -63,7 +64,7 @@ object Calls {
     @Suppress("DEPRECATION")
     fun listen(ctx: Context) {
         val tm = ctx.getSystemService(TelephonyManager::class.java) ?: return
-        Handler(Looper.getMainLooper()).post {
+        main.post {
             if (listener != null) return@post
             // The older listener gives the phone number (with READ_CALL_LOG); TelephonyCallback does not.
             val l = object : PhoneStateListener() {
@@ -99,7 +100,7 @@ object Calls {
     }
 
     @Suppress("DEPRECATION")
-    fun stop(ctx: Context) = Handler(Looper.getMainLooper()).post {
+    fun stop(ctx: Context) = main.post {
         listener?.let { ctx.getSystemService(TelephonyManager::class.java)?.listen(it, PhoneStateListener.LISTEN_NONE) }
         listener = null
     }

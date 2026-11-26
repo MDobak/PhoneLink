@@ -201,7 +201,7 @@ struct PhotoDetail: View {
 }
 
 enum PhotoActions {
-    static func type(_ p: PhonePhoto) -> UTType {
+    private static func type(_ p: PhonePhoto) -> UTType {
         UTType(filenameExtension: (p.name as NSString).pathExtension) ?? .jpeg
     }
 

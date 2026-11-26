@@ -32,6 +32,11 @@ object Hub {
     fun addListener(l: () -> Unit) { listeners.add(l) }
     fun removeListener(l: () -> Unit) { listeners.remove(l) }
     fun changed() { main.post { listeners.forEach { it() } } }
+    /** A service with a permission (accessibility, notifications) started or stopped. The Mac also gets the new status. */
+    fun permsChanged() {
+        changed()
+        main.post { service?.takeIf { session != null }?.let { send(it.status()) } }
+    }
 }
 
 fun json(vararg pairs: Pair<String, Any?>): JSONObject {

@@ -35,7 +35,7 @@ object Hotspot {
     }
 
     /** Interfaces with a private IPv4 address that no network of the phone uses: hotspot, USB or Bluetooth tethering. */
-    fun tetherInterfaces(c: Context): Set<String> = try {
+    private fun tetherInterfaces(c: Context): Set<String> = try {
         val cm = c.getSystemService(ConnectivityManager::class.java)
         @Suppress("DEPRECATION")
         val used = cm.allNetworks.mapNotNull { cm.getLinkProperties(it)?.interfaceName }.toSet()

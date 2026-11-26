@@ -169,7 +169,7 @@ final class PrivateWifi: ObservableObject {
         if busy { lastBusy = Date() }
         // Rule 4.
         if Date().timeIntervalSince(lastBusy) > Self.idleLimit { stop(); return }
-        // No session for 90 seconds: the phone stopped the network.
+        // About 100 seconds with no session: the phone stopped the network.
         offlineTicks = PhoneLink.shared.state == .connected ? 0 : offlineTicks + 1
         if offlineTicks > 9 { finish() }
     }

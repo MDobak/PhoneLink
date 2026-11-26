@@ -81,6 +81,8 @@ final class PhoneLink: ObservableObject {
     /// Nil while ringing or with no call.
     @Published private(set) var callStartedAt: Date?
     @Published private(set) var screen: ScreenState = .stopped(nil)
+    /// The width of the phone screen in dp (0 when not known). 100% scale shows 1 dp as 1 Mac point.
+    @Published private(set) var screenDpWidth: CGFloat = 0
     @Published private(set) var screenSound = false
     /// The phone shows a PIN or password lock screen during USB screen sharing.
     @Published var phoneLocked = false
@@ -107,7 +109,7 @@ final class PhoneLink: ObservableObject {
 
     let queue = DispatchQueue(label: "phonelink.link", qos: .userInteractive)
     private var browser: NWBrowser?
-    private var caps: AnyCancellable?
+    private var capsSink: AnyCancellable?
     private var endpoints: [String: NWEndpoint] = [:]
     private var transport: LinkTransport?
     /// The paired phone on the USB cable. On queue.
@@ -161,7 +163,6 @@ final class PhoneLink: ObservableObject {
     private var watchingNotifications = false
     private var directTicks = 0
     private var grantTried = false
-    private var wifiAsked = false
     private var lastWifiAsk = Date.distantPast
 
     // Handshake values that live only until the session keys exist.
@@ -185,7 +186,7 @@ final class PhoneLink: ObservableObject {
     /// Access on queue only. isPaired is the copy for the views.
     private var pairing: Pairing? {
         didSet {
-            savePairing()
+            Self.store.save(pairing)
             let paired = pairing != nil
             onMain { self.isPaired = paired }
         }
@@ -198,30 +199,14 @@ final class PhoneLink: ObservableObject {
         return id
     }()
 
-    private static var storeURL: URL {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Phone Link", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o700])
-        return dir.appendingPathComponent("pairing.json")
-    }
+    private static let store = SecretFile(name: "pairing.json")
 
     private init() {
         if Self.demoBlocked { localNetworkBlocked = true }
-        if let d = try? Data(contentsOf: Self.storeURL), let p = try? JSONDecoder().decode(Pairing.self, from: d) {
+        if let p = Self.store.load(Pairing.self) {
             pairing = p
             isPaired = true
             phoneName = p.phoneName
-        }
-    }
-
-    private func savePairing() {
-        let url = Self.storeURL
-        if let p = pairing, let d = try? JSONEncoder().encode(p) {
-            try? d.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } else {
-            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -243,13 +228,13 @@ final class PhoneLink: ObservableObject {
         }
         let agent = AdbAgent.shared
         agent.onPush = { [weak self] j in self?.handleShell(j) }
-        agent.onReady = { [weak self] on in
+        agent.onReady = { [weak self] _ in
             guard let self else { return }
             // A restarted helper does not watch notifications yet, and caps can stay the same. Ask again.
             self.watchingNotifications = false
             self.updateNotificationWatch()
         }
-        caps = agent.$caps.receive(on: DispatchQueue.main).sink { [weak self] c in self?.shellCapsChanged(c) }
+        capsSink = agent.$caps.receive(on: DispatchQueue.main).sink { [weak self] c in self?.shellCapsChanged(c) }
         adbCablesSink = AdbManager.shared.$devices.sink { [weak self] ds in
             let cables = Set(ds.filter { $0.usb && $0.state == .ready }.map(\.serial))
             self?.queue.async { self?.adbCables = cables }
@@ -319,7 +304,7 @@ final class PhoneLink: ObservableObject {
         let h = host.trimmingCharacters(in: .whitespaces)
         guard !h.isEmpty else { return }
         queue.async {
-            self.open(.hostPort(host: NWEndpoint.Host(h), port: NWEndpoint.Port(rawValue: port)!), label: h, host: h)
+            self.open(Self.endpoint(h), label: h, host: h)
         }
     }
 
@@ -537,16 +522,16 @@ final class PhoneLink: ObservableObject {
         if let ep = lastAddress, case let .hostPort(h, _) = ep { tries.append((ep, "\(h)", nil)) }
         // The addresses that the phone sent ("links"). They work without Bonjour.
         for a in phoneAddresses where !tries.contains(where: { $0.1 == a }) {
-            tries.append((.hostPort(host: NWEndpoint.Host(a), port: NWEndpoint.Port(rawValue: port)!), a, nil))
+            tries.append((Self.endpoint(a), a, nil))
         }
         // 127.0.0.1 works only through "adb forward".
         if let h = (host == "127.0.0.1" ? nil : host) ?? pairing?.host, h != "127.0.0.1" {
-            tries.append((.hostPort(host: NWEndpoint.Host(h), port: NWEndpoint.Port(rawValue: port)!), h, h))
+            tries.append((Self.endpoint(h), h, h))
         }
         // On a phone hotspot the phone does not answer Bonjour, but it is the gateway of the Mac.
         let known = Set(tries.map(\.1))
         for g in gateways where !known.contains(g) {
-            tries.append((.hostPort(host: NWEndpoint.Host(g), port: NWEndpoint.Port(rawValue: port)!), g, nil))
+            tries.append((Self.endpoint(g), g, nil))
         }
         return tries
     }
@@ -664,8 +649,8 @@ final class PhoneLink: ObservableObject {
     /// Call on queue.
     private func startUsb() {
         usb.shouldSwitch = { [weak self] d in
-            guard let self, !self.debugBluetooth, UserDefaults.standard.object(forKey: Aoa.settingKey) as? Bool ?? true,
-                  self.pairing != nil, self.pairKey == nil, self.transport?.kind != .usb else { return false }
+            guard let self, !self.debugBluetooth, Aoa.isOn, self.pairing != nil, self.pairKey == nil,
+                  self.transport?.kind != .usb else { return false }
             if let known = UsbWatcher.knownSerial ?? AdbManager.pairedPhoneID {
                 guard d.serial == known else { return false }
             } else if UsbWatcher.otherSerials.contains(d.serial) {
@@ -705,11 +690,9 @@ final class PhoneLink: ObservableObject {
         usb.start()
     }
 
-    private var useCable: Bool { UserDefaults.standard.object(forKey: Aoa.settingKey) as? Bool ?? true }
-
     /// The adb serial of the paired phone on a USB cable with USB debugging on. Call on queue.
     private func cableSerial() -> String? {
-        guard useCable, !debugBluetooth else { return nil }
+        guard Aoa.isOn, !debugBluetooth else { return nil }
         let ok = adbCables.filter { s in
             !UsbWatcher.otherSerials.contains(s) && forwardFailed[s].map { Date().timeIntervalSince($0) > 60 } ?? true
         }
@@ -735,13 +718,18 @@ final class PhoneLink: ObservableObject {
                 self.forwarding = false
                 guard self.pairing != nil, self.transport?.kind != .usb, self.transport?.kind != .adb else { return }
                 guard ok else { self.forwardFailed[serial] = Date(); fallback?(); return }
-                self.open(.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!), label: "USB", host: "127.0.0.1")
+                self.open(Self.endpoint("127.0.0.1"), label: "USB", host: "127.0.0.1")
                 self.forwardSerial = serial
             }
         }
     }
 
     // MARK: - Network changes
+
+    /// The Phone Link port at a host.
+    private static func endpoint(_ host: String) -> NWEndpoint {
+        .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
+    }
 
     /// "192.168.43.1" for an IPv4 host. Removes the interface part of an IPv6 address.
     private static func address(_ h: NWEndpoint.Host) -> String {
@@ -751,12 +739,8 @@ final class PhoneLink: ObservableObject {
 
     /// Call on queue.
     private func pathChanged(_ p: NWPath) {
-        let lowData = p.isConstrained
         let onWifi = p.status == .satisfied
-        onMain {
-            PhoneHotspot.shared.lowDataMode = lowData
-            if self.macOnWifi != onWifi { self.macOnWifi = onWifi }
-        }
+        onMain { if self.macOnWifi != onWifi { self.macOnWifi = onWifi } }
         let gw = p.gateways.compactMap { ep -> String? in
             guard case let .hostPort(h, _) = ep, case .ipv4 = h else { return nil }
             return Self.address(h)
@@ -776,7 +760,7 @@ final class PhoneLink: ObservableObject {
         guard pairing != nil, pairKey == nil, remoteHost != "127.0.0.1" || tx == nil else { return }
         // On Bluetooth, the new network can be faster, for example the private Wi-Fi network of the phone.
         if transport?.kind == .bluetooth {
-            if let g = gateways.first { probeUpgrade(first: (.hostPort(host: NWEndpoint.Host(g), port: NWEndpoint.Port(rawValue: port)!), g, nil)) }
+            if let g = gateways.first { probeUpgrade(first: (Self.endpoint(g), g, nil)) }
             return
         }
         // The cable does not use the network.
@@ -801,8 +785,9 @@ final class PhoneLink: ObservableObject {
     private func connectToGateway() {
         guard pairing != nil, let g = gateways.first else { return }
         retry?.cancel()
-        attempts = 1 // The next reconnect tries adb first.
-        open(.hostPort(host: NWEndpoint.Host(g), port: NWEndpoint.Port(rawValue: port)!), label: g, host: nil)
+        // The gateway is an extra try. If it fails, the usual order starts again: the cable, then Bonjour.
+        attempts = 0
+        open(Self.endpoint(g), label: g, host: nil)
     }
 
     /// Call on queue.
@@ -976,7 +961,6 @@ final class PhoneLink: ObservableObject {
         ble.wantScan = false
         onMain {
             self.grantTried = false
-            self.wifiAsked = false
             self.linkKind = kind
             self.sessionState = .connected
             PrivateWifi.shared.sessionStarted(kind: kind)
@@ -986,6 +970,7 @@ final class PhoneLink: ObservableObject {
             self.send(["t": "contacts"])
             self.send(["t": "calls.log", "limit": 100])
             FocusSync.shared.resend()
+            AgentServer.shared.sendConfig()
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.refreshAdb() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self.askWirelessDebugging() }
         }
@@ -1006,6 +991,8 @@ final class PhoneLink: ObservableObject {
                     // Remote Desktop and Terminal: these handlers run on the link queue and must not block it.
                     else if t.hasPrefix("rd.") { RemoteDesktopHost.shared.handle(j) }
                     else if t.hasPrefix("term.") { RemoteTerminal.shared.handle(j) }
+                    else if t == "agent.result" { AgentPhone.shared.received(j) }
+                    else if t == "agent.stop" { AgentServer.shared.stopAll() }
                     else { self.onMain { self.handle(j) } }
                 }
             } else if type == 3, body.count >= 4 {
@@ -1037,7 +1024,7 @@ final class PhoneLink: ObservableObject {
             let can = self.shellCan(type, j)
             switch PhoneRouter.decide(type, session: self.tx != nil, perms: self.routePerms, shellCan: can) {
             case .app?:
-                if self.transport?.kind == .bluetooth, let f = PhoneFeature.owner(of: type), Ble.slowFeatures.contains(f) { return }
+                if self.tooSlow(type, path: .app) { return }
                 if PhoneRouter.canRetry(type, from: .app) { self.appRequests[type] = j }
                 self.sendToApp(j)
             case .shell?:
@@ -1048,11 +1035,27 @@ final class PhoneLink: ObservableObject {
         }
     }
 
+    /// True when send(_:) drops requests of this type: they go to the app, and Bluetooth is too slow for them.
+    /// Do not call on queue (it uses queue.sync).
+    func isTooSlow(_ type: String) -> Bool {
+        queue.sync { tooSlow(type, path: PhoneRouter.decide(type, session: tx != nil, perms: routePerms, shellCan: shellCan(type))) }
+    }
+
+    /// On queue.
+    private func tooSlow(_ type: String, path: PhonePath?) -> Bool {
+        guard path == .app, transport?.kind == .bluetooth, let f = PhoneFeature.owner(of: type) else { return false }
+        return Ble.slowFeatures.contains(f)
+    }
+
     private func shellCan(_ type: String, _ j: JSON? = nil) -> Bool {
-        let agent = AdbAgent.shared
+        Self.helperCan(type, image: j?["image"] != nil, AdbAgent.shared.can)
+    }
+
+    /// has: the request types that the helper reports.
+    private static func helperCan(_ type: String, image: Bool = false, _ has: (String) -> Bool) -> Bool {
         // Older helpers can set only text ("clip.set").
-        if type == "clip" { return agent.can("clip") || (j?["image"] == nil && agent.can("clip.set")) }
-        return agent.can(type)
+        if type == "clip" { return has("clip") || (!image && has("clip.set")) }
+        return has(type)
     }
 
     /// Falls back to the app session when the helper fails and the app can do the request.
@@ -1209,6 +1212,7 @@ final class PhoneLink: ObservableObject {
     private func handle(_ j: JSON, from source: PhonePath = .app) {
         // Drop traffic of features that are off. Keep "status": it has the permissions.
         if let t = j.str("t"), t != "status", PhoneFeature.owner(of: t)?.isOff == true { return }
+        AgentServer.shared.phoneEvent(j)
         switch j.str("t") {
         case "status":
             if j["battery"] != nil, !PhoneFeature.battery.isOff { battery = j.int("battery") }
@@ -1323,7 +1327,9 @@ final class PhoneLink: ObservableObject {
 
         case "screen.state":
             switch j.str("state") {
-            case "streaming": screen = .streaming(width: j.int("width") ?? 0, height: j.int("height") ?? 0)
+            case "streaming":
+                if let dp = j.int("dpWidth"), dp > 0 { screenDpWidth = CGFloat(dp) }
+                screen = .streaming(width: j.int("width") ?? 0, height: j.int("height") ?? 0)
             case "waiting": screen = .waiting(j.str("msg") ?? "Waiting for the phone…")
             default: screen = .stopped(j.str("msg"))
             }
@@ -1601,7 +1607,6 @@ final class PhoneLink: ObservableObject {
     /// Applies Settings > Connections at once: stops or restarts adb, drops data of features that are off, and
     /// loads the rest again from their current path.
     func featureChoicesChanged() {
-        wifiAsked = false
         grantTried = false
         refreshAdb()
         updateNotificationWatch()
@@ -1618,7 +1623,7 @@ final class PhoneLink: ObservableObject {
         SpotlightIndex.shared.update()
         guard state == .connected, !Self.isDemo else { return }
         // send() drops the requests of the features that are off.
-        for j: JSON in [["t": "status"], ["t": "sms.threads"], ["t": "notif.list"], ["t": "contacts"], ["t": "calls.log", "limit": 100]] { send(j) }
+        Self.dataLoads.forEach(send)
     }
 
     func directPhoneChanged() {
@@ -1637,13 +1642,16 @@ final class PhoneLink: ObservableObject {
         refreshAdb()
     }
 
+    /// The requests that load the phone data again after a change of path.
+    private static let dataLoads: [JSON] = [["t": "status"], ["t": "sms.threads"], ["t": "notif.list"], ["t": "contacts"],
+                                            ["t": "calls.log", "limit": 100]]
+
     private func shellCapsChanged(_ c: Set<String>) {
         let added = c.subtracting(shellCaps)
         shellCaps = c
         updateNotificationWatch()
         guard !added.isEmpty else { return }
-        let loads: [JSON] = [["t": "status"], ["t": "sms.threads"], ["t": "notif.list"], ["t": "contacts"], ["t": "calls.log", "limit": 100]]
-        for j in loads where added.contains(j.str("t")!) && path(forType: j.str("t")!) == .shell { send(j) }
+        for j in Self.dataLoads where added.contains(j.str("t")!) && path(forType: j.str("t")!) == .shell { send(j) }
         if added.contains("photos.list"), !photos.isEmpty || photosError != nil { loadPhotos() }
     }
 
@@ -1656,8 +1664,8 @@ final class PhoneLink: ObservableObject {
     }
 
     func path(forType t: String) -> PhonePath? {
-        let can = t == "clip" ? shellCaps.contains("clip") || shellCaps.contains("clip.set") : shellCaps.contains(t)
-        return PhoneRouter.decide(t, session: sessionConnected, perms: perms, shellCan: AdbAgent.shared.ready && can)
+        let can = AdbAgent.shared.ready && Self.helperCan(t) { shellCaps.contains($0) }
+        return PhoneRouter.decide(t, session: sessionConnected, perms: perms, shellCan: can)
     }
 
     /// When an app permission is off and no other path can do the feature, this gives .app, so that the app tells
@@ -1727,7 +1735,6 @@ final class PhoneLink: ObservableObject {
     private func askWirelessDebugging() {
         guard sessionConnected, PhoneRouter.usesDebugging, adbSerial == nil, UserDefaults.standard.bool(forKey: "autoWirelessDebugging"),
               Date().timeIntervalSince(lastWifiAsk) > 60 else { return }
-        wifiAsked = true
         lastWifiAsk = Date()
         queue.async { self.sendToApp(["t": "adb.wifi"]) }
     }

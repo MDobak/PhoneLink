@@ -41,7 +41,7 @@ private const val TAG = "PhoneLinkFiles"
 object PhoneFiles {
     fun hasAccess() = Environment.isExternalStorageManager()
 
-    fun roots(ctx: Context): List<Pair<String, File>> =
+    private fun roots(ctx: Context): List<Pair<String, File>> =
         ctx.getSystemService(StorageManager::class.java).storageVolumes.mapNotNull { v ->
             val dir = v.directory ?: return@mapNotNull null
             (if (v.isPrimary) "Internal storage" else v.getDescription(ctx)) to dir
@@ -51,7 +51,7 @@ object PhoneFiles {
         if (!hasAccess()) throw FileAccessException()
     }
 
-    // Only paths inside a storage volume are allowed.
+    /** Only paths inside a storage volume are allowed. */
     fun resolve(ctx: Context, path: String): File {
         requireAccess()
         val f = File(path).canonicalFile
@@ -78,8 +78,6 @@ object PhoneFiles {
         return roots(ctx).toJsonArray { (name, f) -> json("name" to name, "path" to f.path, "dir" to true) }
     }
 
-    // File operations from the Mac run on a worker thread.
-
     private fun isRoot(ctx: Context, f: File) = roots(ctx).any { (_, r) -> r.canonicalFile == f }
 
     private fun resolveItem(ctx: Context, path: String): File {
@@ -99,7 +97,7 @@ object PhoneFiles {
         return n
     }
 
-    fun info(f: File, deep: Boolean): JSONObject {
+    private fun info(f: File, deep: Boolean): JSONObject {
         val o = json("name" to f.name, "path" to f.path, "dir" to f.isDirectory,
             "size" to (if (f.isFile) f.length() else 0L), "mtime" to f.lastModified(), "writable" to f.canWrite())
         try {
@@ -248,12 +246,14 @@ class RemoteFile(val name: String, val path: String, val dir: Boolean, val size:
  * Error codes: "perm" (no file access), "notfound", "exists".
  */
 object Transfers {
+    enum class State { ACTIVE, DONE, FAILED, CANCELLED }
+
     class Item(val id: Int, val name: String, val upload: Boolean, @Volatile var total: Long) {
         @Volatile var done = 0L
-        @Volatile var state = "active" // active, done, failed, cancelled
+        @Volatile var state = State.ACTIVE
         @Volatile var error: String? = null
         @Volatile var uri: Uri? = null
-        val active get() = state == "active"
+        val active get() = state == State.ACTIVE
     }
 
     class Source(val name: String, val size: Long, val input: InputStream)
@@ -311,16 +311,10 @@ object Transfers {
     fun handle(ctx: Context, s: Session, m: JSONObject) {
         val id = m.optInt("id")
         when (m.optString("t")) {
-            "fs.roots" -> pool.execute {
-                try { s.send(json("t" to "fs.result", "id" to id, "items" to PhoneFiles.rootsJson(ctx))) }
-                catch (e: Exception) { s.send(err(id, e)) }
-            }
-            "fs.list" -> pool.execute {
-                try {
-                    val dir = PhoneFiles.resolve(ctx, m.getString("path"))
-                    s.send(json("t" to "fs.result", "id" to id, "path" to dir.path, "writable" to dir.canWrite(),
-                        "items" to PhoneFiles.list(dir)))
-                } catch (e: Exception) { s.send(err(id, e)) }
+            "fs.roots" -> op(s, id) { json("items" to PhoneFiles.rootsJson(ctx)) }
+            "fs.list" -> op(s, id) {
+                val dir = PhoneFiles.resolve(ctx, m.getString("path"))
+                json("path" to dir.path, "writable" to dir.canWrite(), "items" to PhoneFiles.list(dir))
             }
             "fs.stat" -> op(s, id) { PhoneFiles.stat(ctx, m.getString("path"), m.optBoolean("deep")) }
             "fs.delete" -> op(s, id) { PhoneFiles.delete(ctx, m.getJSONArray("paths")) }
@@ -334,15 +328,15 @@ object Transfers {
             "fs.put" -> receive(ctx, s, id, m)
             "fs.end" -> finishIncoming(ctx, s, id)
             "fs.cancel" -> {
-                sending[id]?.let { it.cancelled = true; it.item?.state = "cancelled" }
-                incoming.remove(id)?.let { it.abort(); it.item?.state = "cancelled" }
+                sending[id]?.let { it.cancelled = true; it.item?.state = State.CANCELLED }
+                incoming.remove(id)?.let { it.abort(); it.item?.state = State.CANCELLED }
                 changed(true)
             }
             "fs.meta" -> incoming[id]?.item?.let { it.total = m.optLong("size", it.total); changed(true) }
-            "fs.done" -> sending.remove(id)?.item?.let { it.state = "done"; it.done = it.total.coerceAtLeast(it.done); changed(true) }
+            "fs.done" -> sending.remove(id)?.item?.let { it.state = State.DONE; it.done = it.total.coerceAtLeast(it.done); changed(true) }
             "fs.error" -> {
-                sending.remove(id)?.let { it.cancelled = true; it.item?.apply { state = "failed"; error = m.optString("msg") } }
-                incoming.remove(id)?.let { it.abort(); it.item?.apply { state = "failed"; error = m.optString("msg") } }
+                sending.remove(id)?.let { it.cancelled = true; it.item?.apply { state = State.FAILED; error = m.optString("msg") } }
+                incoming.remove(id)?.let { it.abort(); it.item?.apply { state = State.FAILED; error = m.optString("msg") } }
                 pending.remove(id)?.let { cb -> main.post { cb(m) } }
                 changed(true)
             }
@@ -441,7 +435,7 @@ object Transfers {
             incoming.remove(id)
             inc.abort()
             // A user cancel closes the output, so the write fails. Keep the state "cancelled".
-            inc.item?.takeIf { it.active }?.apply { state = "failed"; error = e.message }
+            inc.item?.takeIf { it.active }?.apply { state = State.FAILED; error = e.message }
             s.send(json("t" to "fs.cancel", "id" to id))
             if (inc.replyDone) s.send(err(id, e))
             changed(true)
@@ -453,21 +447,21 @@ object Transfers {
         try {
             if (inc.expected >= 0 && inc.received != inc.expected) throw IOException("The file is incomplete.")
             val name = inc.commit()
-            inc.item?.apply { state = "done"; done = inc.received; total = inc.received }
+            inc.item?.apply { state = State.DONE; done = inc.received; total = inc.received }
             if (inc.replyDone) s.send(json("t" to "fs.done", "id" to id, "name" to name))
             if (!inc.quiet) notifyReceived(ctx, name, inc.item?.uri, s.macName)
         } catch (e: Exception) {
             inc.abort()
-            inc.item?.apply { state = "failed"; error = e.message }
+            inc.item?.apply { state = State.FAILED; error = e.message }
             if (inc.replyDone) s.send(err(id, e))
         }
         changed(true)
     }
 
     fun sessionClosed() {
-        incoming.values.forEach { it.abort(); it.item?.takeIf { i -> i.active }?.apply { state = "failed"; error = "The Mac disconnected." } }
+        incoming.values.forEach { it.abort(); it.item?.takeIf { i -> i.active }?.apply { state = State.FAILED; error = "The Mac disconnected." } }
         incoming.clear()
-        sending.values.forEach { it.cancelled = true; it.item?.takeIf { i -> i.active }?.apply { state = "failed"; error = "The Mac disconnected." } }
+        sending.values.forEach { it.cancelled = true; it.item?.takeIf { i -> i.active }?.apply { state = State.FAILED; error = "The Mac disconnected." } }
         sending.clear()
         val cbs = pending.values.toList()
         pending.clear()
@@ -501,7 +495,7 @@ object Transfers {
 
     // Writes to a hidden temp file first. With replace, overwrites a file with the same name, else picks a free name.
     private fun folderTarget(ctx: Context, dir: File, name: String, size: Long, item: Item?,
-                             replace: Boolean = false, quiet: Boolean = false): Incoming {
+                             replace: Boolean, quiet: Boolean): Incoming {
         if (!dir.isDirectory) throw IOException("This folder does not exist.")
         if (replace && File(dir, name).isDirectory) throw FileExists(name)
         val dest = if (replace) File(dir, name) else unique(dir, name)
@@ -523,7 +517,7 @@ object Transfers {
     private fun mimeOf(name: String) =
         MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase())
 
-    fun safeName(raw: String): String {
+    private fun safeName(raw: String): String {
         val n = raw.substringAfterLast('/').substringAfterLast('\\').filter { it.code >= 32 && it.code != 127 }.trim().take(200)
         return if (n.isEmpty() || n == "." || n == "..") "file" else n
     }
@@ -547,8 +541,19 @@ object Transfers {
         s.send(json("t" to t, "id" to id, "path" to path))
     }
 
-    fun download(ctx: Context, f: RemoteFile) {
-        val s = Hub.session ?: return
+    /**
+     * Why files cannot go to or from the Mac now, or null. Bluetooth is too slow for files, and a file blocks the
+     * messages behind it. The Mac also refuses files on Bluetooth.
+     */
+    fun unavailable(): String? {
+        val s = Hub.session ?: return "Not connected to your Mac."
+        return if (s.kind == LinkKind.BLUETOOTH) "Files cannot go over Bluetooth. Connect through Wi-Fi or a USB cable." else null
+    }
+
+    /** Returns an error message, or null when the download started. */
+    fun download(ctx: Context, f: RemoteFile): String? {
+        unavailable()?.let { return it }
+        val s = Hub.session ?: return "Not connected to your Mac."
         val id = ids.getAndIncrement()
         val item = Item(id, f.name, upload = false, total = f.size)
         items.add(0, item)
@@ -556,9 +561,10 @@ object Transfers {
             incoming[id] = downloadsTarget(ctx.applicationContext, safeName(f.name), -1, item, replyDone = false)
             s.send(json("t" to "fs.get", "id" to id, "path" to f.path))
         } catch (e: Exception) {
-            item.state = "failed"; item.error = e.message
+            item.state = State.FAILED; item.error = e.message
         }
         changed(true)
+        return null
     }
 
     // Open the files now: a share or picker grant can end when its activity closes.
@@ -580,9 +586,14 @@ object Transfers {
         }
     }
 
-    fun upload(sources: List<Source>, dir: String?): Boolean {
+    /** Returns an error message, or null when the upload started. */
+    fun upload(sources: List<Source>, dir: String?): String? {
         val s = Hub.session
-        if (s == null) { sources.forEach { try { it.input.close() } catch (_: Exception) {} }; return false }
+        val error = unavailable()
+        if (s == null || error != null) {
+            sources.forEach { try { it.input.close() } catch (_: Exception) {} }
+            return error ?: "Not connected to your Mac."
+        }
         val queued = sources.map { src ->
             val item = Item(ids.getAndIncrement(), src.name, upload = true, total = src.size)
             items.add(0, item)
@@ -591,28 +602,32 @@ object Transfers {
         changed(true)
         thread(name = "phonelink-upload") {
             for ((src, item) in queued) {
-                if (item.state != "active") { try { src.input.close() } catch (_: Exception) {}; continue }
+                if (!item.active) { try { src.input.close() } catch (_: Exception) {}; continue }
                 val snd = Sending(item)
                 sending[item.id] = snd
                 try {
                     s.send(json("t" to "fs.put", "id" to item.id, "dir" to dir, "name" to src.name, "size" to src.size))
                     src.input.use { stream(s, item.id, it, snd) }
-                    if (snd.cancelled) s.send(json("t" to "fs.cancel", "id" to item.id))
-                    else s.send(json("t" to "fs.end", "id" to item.id))
+                    if (snd.cancelled) {
+                        sending.remove(item.id)
+                        s.send(json("t" to "fs.cancel", "id" to item.id))
+                    } else {
+                        s.send(json("t" to "fs.end", "id" to item.id))
+                    }
                 } catch (e: Exception) {
                     sending.remove(item.id)
-                    if (item.active) { item.state = "failed"; item.error = e.message }
+                    if (item.active) { item.state = State.FAILED; item.error = e.message }
                     s.send(json("t" to "fs.cancel", "id" to item.id))
                 }
                 changed(true)
             }
         }
-        return true
+        return null
     }
 
     fun cancel(item: Item) {
         if (!item.active) return
-        item.state = "cancelled"
+        item.state = State.CANCELLED
         sending[item.id]?.cancelled = true
         incoming.remove(item.id)?.abort()
         Hub.session?.send(json("t" to "fs.cancel", "id" to item.id))

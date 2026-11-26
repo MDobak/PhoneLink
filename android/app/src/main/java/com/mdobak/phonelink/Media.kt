@@ -18,8 +18,8 @@ import java.io.ByteArrayOutputStream
 object Media {
     private val main = Handler(Looper.getMainLooper())
     private var msm: MediaSessionManager? = null
-    private var ctx: Context? = null
-    private var controller: MediaController? = null
+    @Volatile private var ctx: Context? = null
+    @Volatile private var controller: MediaController? = null
     private var sentArt: String? = null
 
     private val sessions = MediaSessionManager.OnActiveSessionsChangedListener { pick(it) }
@@ -75,7 +75,16 @@ object Media {
         Hub.send(current())
     }
 
-    private fun current(): JSONObject {
+    /** The media that plays, without the art. For agents, on any thread. */
+    fun info(): JSONObject {
+        val o = current(withArt = false)
+        o.remove("t")
+        o.remove("artKey")
+        return o
+    }
+
+    /** With withArt, adds the art when the Mac does not have it yet. Main thread only then. */
+    private fun current(withArt: Boolean = true): JSONObject {
         // Another session can start to play while the current one is paused.
         val c = controller ?: return json("t" to "media", "active" to false)
         val md = c.metadata
@@ -105,7 +114,7 @@ object Media {
             "canSeek" to (ps.actions and PlaybackState.ACTION_SEEK_TO != 0L && duration > 0),
             "artKey" to artKey,
         )
-        if (artKey != sentArt) {
+        if (withArt && artKey != sentArt) {
             val bmp = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART) ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
                 ?: md?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
             o.put("art", bmp?.let { jpeg(it) } ?: JSONObject.NULL)

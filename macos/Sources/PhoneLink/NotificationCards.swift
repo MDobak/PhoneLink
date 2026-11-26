@@ -24,7 +24,7 @@ extension Color {
 }
 
 /// A short age as in the Android notification shade: "now", "5m", "3h", "2d", then a date.
-func shortAge(_ d: Date, now: Date = Date()) -> String {
+private func shortAge(_ d: Date, now: Date) -> String {
     let s = max(0, now.timeIntervalSince(d))
     switch s {
     case ..<60: return "now"

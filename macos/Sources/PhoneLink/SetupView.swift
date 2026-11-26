@@ -236,8 +236,7 @@ private struct AppPairingPage: View {
                                 NotReadyPhoneRow(name: name, via: "Wi-Fi")
                             }
                         }
-                        // A phone on the same Wi-Fi network shows one time only.
-                        ForEach(link.nearbyPhones.filter { p in !link.discovered.contains { $0.name.replacingOccurrences(of: "Phone Link ", with: "").hasPrefix(p.name) } }, id: \.id) { p in
+                        ForEach(bluetoothOnlyPhones, id: \.id) { p in
                             // The phone sends only the first 10 bytes of its name.
                             phoneRow(p.name.utf8.count >= 9 ? p.name + "…" : p.name, via: "Bluetooth") { link.connect(bluetooth: p.id) }
                         }
@@ -255,7 +254,7 @@ private struct AppPairingPage: View {
                                     .frame(width: 140)
                                     .onSubmit(connectToAddress)
                                 Button("Connect", action: connectToAddress)
-                                    .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty || isBusy)
+                                    .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty || link.state.isConnecting)
                             }
                         } label: {
                             Text("Connect with IP Address")
@@ -285,17 +284,19 @@ private struct AppPairingPage: View {
                 Text(via).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Pair", action: pair).disabled(isBusy)
+            Button("Pair", action: pair).disabled(link.state.isConnecting)
         }
     }
 
-    private var isBusy: Bool {
-        if case .connecting = link.state { return true }
-        return false
+    /// A phone that is also on the same Wi-Fi network shows only once, in the Wi-Fi row.
+    private var bluetoothOnlyPhones: [BlePhone] {
+        link.nearbyPhones.filter { p in
+            !link.discovered.contains { $0.name.replacingOccurrences(of: "Phone Link ", with: "").hasPrefix(p.name) }
+        }
     }
 
     private func connectToAddress() {
-        guard !isBusy, !address.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        guard !link.state.isConnecting, !address.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         link.connect(host: address)
     }
 }
@@ -506,15 +507,10 @@ private struct DebuggingSetupPage: View {
                 ProgressView().controlSize(.small)
             } else {
                 Button("Set Up") { setup.start(d) }
-                    .disabled(d.state != .ready || setup.running != nil || isConnecting)
+                    .disabled(d.state != .ready || setup.running != nil || link.state.isConnecting)
             }
         }
         .accessibilityElement(children: .combine)
-    }
-
-    private var isConnecting: Bool {
-        if case .connecting = link.state { return true }
-        return false
     }
 
     private func subtitle(_ d: AdbDevice) -> String {
@@ -523,6 +519,13 @@ private struct DebuggingSetupPage: View {
         case .unauthorized: "Unlock the phone and tap Allow"
         case .offline: "Not available. Connect the cable again."
         }
+    }
+}
+
+private extension LinkState {
+    var isConnecting: Bool {
+        if case .connecting = self { return true }
+        return false
     }
 }
 

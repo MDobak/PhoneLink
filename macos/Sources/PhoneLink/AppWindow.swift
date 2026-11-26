@@ -28,6 +28,13 @@ final class AppStream: ObservableObject {
     private var viewSize: CGSize = .zero
     private var sentSize: CGSize = .zero
     private var pendingResize: DispatchWorkItem?
+    /// Mac points for each Android dp. A smaller scale shows more of the app in the same window. Main thread only.
+    var scale: CGFloat = 1 {
+        didSet {
+            guard scale != oldValue, videoSize != .zero else { return }
+            scheduleResize(after: 0)
+        }
+    }
     /// Network thread only.
     private var frameSeen = false
     private let lock = NSLock()
@@ -36,6 +43,13 @@ final class AppStream: ObservableObject {
     private static var usedSlots = Set<Int>()
     /// Main thread only.
     private static let all = NSHashTable<AppStream>.weakObjects()
+    /// The Mac window and the app name, for agents (windows_read). Main thread only.
+    weak var window: NSWindow?
+    var label: String?
+
+    /// The windows that show or open an app. Main thread only.
+    static var open: [AppStream] { all.allObjects.filter { $0.phase != .idle } }
+
     /// Pending notifications for windows not open yet, by package. Main thread only.
     private static var pending: [String: (key: String, time: Date)] = [:]
 
@@ -159,11 +173,12 @@ final class AppStream: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: w)
     }
 
-    /// One Mac point is one Android dp.
+    /// At scale 1, one Mac point is one Android dp.
     private func sendResize() {
-        guard phase == .opening || phase == .streaming, viewSize.width >= 1, viewSize.height >= 1, viewSize != sentSize else { return }
-        sentSize = viewSize
-        screen.send(["t": "resize", "w": Int(viewSize.width), "h": Int(viewSize.height)])
+        let dp = CGSize(width: (viewSize.width / scale).rounded(), height: (viewSize.height / scale).rounded())
+        guard phase == .opening || phase == .streaming, dp.width >= 1, dp.height >= 1, dp != sentSize else { return }
+        sentSize = dp
+        screen.send(["t": "resize", "w": Int(dp.width), "h": Int(dp.height)])
     }
 
     private func handle(_ j: JSON) {
@@ -195,11 +210,17 @@ struct AppWindowView: View {
     @State private var visible = false
     @State private var showLauncher = true
     @State private var window: NSWindow?
+    @State private var scale: CGFloat
 
     init(pkg: String) {
         self.pkg = pkg
         _stream = StateObject(wrappedValue: AppStream(pkg: pkg))
+        let saved = UserDefaults.standard.double(forKey: Self.scaleKey(pkg))
+        _scale = State(initialValue: saved > 0 ? CGFloat(saved) : 1)
     }
+
+    /// Each app keeps its own scale.
+    private static func scaleKey(_ pkg: String) -> String { "appWindowScale." + pkg }
 
     private var isDesktop: Bool { pkg == AppStream.desktopID }
     private var name: String { isDesktop ? "Phone Desktop" : (label ?? pkg) }
@@ -228,6 +249,10 @@ struct AppWindowView: View {
                     }
                 }
                 ToolbarItem(placement: .primaryAction) {
+                    ScaleMenu(scale: scale, help: "The size of the app content. At a smaller scale, more of the app fits in the window.") { scale = $0 }
+                        .disabled(stream.phase != .streaming)
+                }
+                ToolbarItem(placement: .primaryAction) {
                     Button { stream.restart() } label: { Label("Reload", systemImage: "arrow.clockwise") }
                         .help("Reload")
                         .keyboardShortcut("r")
@@ -236,10 +261,12 @@ struct AppWindowView: View {
             }
             .background(WindowAccessor { w in
                 window = w
+                stream.window = w
                 updateDock()
             })
             .onAppear {
                 visible = true
+                stream.scale = scale
                 lookUpApp()
                 if link.adbSerial != nil, !pkg.isEmpty { stream.start() }
             }
@@ -248,7 +275,12 @@ struct AppWindowView: View {
                 stream.stop()
                 DockShims.shared.closed(pkg: pkg)
             }
-            .onChange(of: label) { _, _ in updateDock() }
+            .onChange(of: label) { _, l in stream.label = l; updateDock() }
+            .onChange(of: scale) { _, s in
+                stream.scale = s
+                if s == 1 { UserDefaults.standard.removeObject(forKey: Self.scaleKey(pkg)) }
+                else { UserDefaults.standard.set(Double(s), forKey: Self.scaleKey(pkg)) }
+            }
             .onChange(of: icon) { _, _ in updateDock() }
             .onChange(of: link.adbSerial) { _, serial in
                 guard visible, !pkg.isEmpty else { return }
@@ -404,7 +436,7 @@ private struct DesktopLauncher: View {
         guard agent.ready else { return }
         agent.apps(system: false) { list in
             // With no list, show "No Apps", not an endless progress indicator.
-            apps = (list ?? []).filter(\.launchable).sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending }
+            apps = (list ?? []).filter(\.launchable)
             loaded = true
         }
     }

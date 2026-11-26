@@ -200,7 +200,7 @@ final class CallAudio: ObservableObject {
             self.serial = s
             self.generation += 1
             self.failures = 0
-            self.stopLocked()
+            self.stopHelper()
             if s != nil { self.launch(self.generation) }
         }
     }
@@ -208,7 +208,6 @@ final class CallAudio: ObservableObject {
     private func launch(_ gen: Int) {
         guard gen == generation, let serial, let adb = AdbManager.path else { return }
         let classpath = AdbManager.classpath(serial)
-        guard gen == generation else { return }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: adb)
         p.arguments = ["-s", serial, "shell", "CLASSPATH=\(classpath) app_process / com.mdobak.phonelink.ShellCallAudio"]
@@ -249,7 +248,7 @@ final class CallAudio: ObservableObject {
     private func ended(_ gen: Int) {
         guard gen == generation else { return }
         generation += 1
-        stopLocked()
+        stopHelper()
         failures += 1
         let delay = min(60.0, 2.0 * pow(2.0, Double(min(failures - 1, 5))))
         CallAudio.log.info("helper stopped, next start in \(Int(delay)) s")
@@ -260,7 +259,7 @@ final class CallAudio: ObservableObject {
         }
     }
 
-    private func stopLocked() {
+    private func stopHelper() {
         conn?.cancel()
         conn = nil
         if let p = process, p.isRunning { p.terminate() }
@@ -331,7 +330,7 @@ private final class CallAudioEngine {
     private var engine = AVAudioEngine()
     private var player = AVAudioPlayerNode()
     private var tonePlayer = AVAudioPlayerNode()
-    private(set) var echoCancellation = true
+    private var echoCancellation = true
     private let playFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
     private let sendFormat = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: rate, channels: 1, interleaved: true)!
     private let onFrame: (Data) -> Void
@@ -339,11 +338,18 @@ private final class CallAudioEngine {
     private var muted = false
     private var pending: [Int16] = []
     private var converter: AVAudioConverter?
-    private var queued = 0 // main thread
+    /// Frames scheduled on the player and not played yet. Main thread.
+    private var queued = 0
+    /// Callbacks from an old player must not change `queued`.
+    private var playerGeneration = 0
+    private var lastDrain = Date()
+    /// Voice processing itself changes the devices just after start.
+    private var startedAt = Date.distantPast
     private var observer: NSObjectProtocol?
     private var statsTimer: Timer?
     private var sent = 0, played = 0, dropped = 0, underruns = 0
     private var micSq = 0.0, playSq = 0.0
+    private var lastSent = 0, lastPlayed = 0
 
     init(onFrame: @escaping (Data) -> Void) { self.onFrame = onFrame }
 
@@ -429,15 +435,11 @@ private final class CallAudioEngine {
     }
 
     func playKeyTone(_ key: Character) {
-        guard let f = DTMF.frequencies(key), engine.isRunning else { return }
-        let n = AVAudioFrameCount(Self.rate * 0.12)
-        guard let b = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: n), let p = b.floatChannelData?[0] else { return }
-        b.frameLength = n
-        let lo = 2 * Double.pi * f.low / Self.rate, hi = 2 * Double.pi * f.high / Self.rate
-        for s in 0..<Int(n) {
-            let fade = min(1, Double(min(s, Int(n) - s)) / 80)
-            p[s] = Float((sin(lo * Double(s)) + sin(hi * Double(s))) * 0.08 * fade)
-        }
+        guard engine.isRunning, let tone = DTMF.tone(key, sampleRate: Self.rate, seconds: 0.12, volume: 0.08),
+              let b = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(tone.count)),
+              let p = b.floatChannelData?[0] else { return }
+        b.frameLength = AVAudioFrameCount(tone.count)
+        p.update(from: tone, count: tone.count)
         tonePlayer.scheduleBuffer(b, completionHandler: nil)
     }
 
@@ -445,9 +447,6 @@ private final class CallAudioEngine {
         startedAt = .distantPast
         restart()
     }
-
-    /// Voice processing itself changes the devices just after start.
-    private var startedAt = Date.distantPast
 
     /// A stopped engine does not always play again with the old player, so rebuild both.
     private func restart() {
@@ -564,10 +563,6 @@ private final class CallAudioEngine {
         return b
     }
 
-    /// Callbacks from an old player must not change `queued`.
-    private var playerGeneration = 0
-    private var lastDrain = Date()
-
     private func schedule(_ b: AVAudioPCMBuffer) {
         let n = Int(b.frameLength)
         let gen = playerGeneration
@@ -580,8 +575,6 @@ private final class CallAudioEngine {
             }
         }
     }
-
-    private var lastSent = 0, lastPlayed = 0
 
     private func logStats() {
         lock.lock()

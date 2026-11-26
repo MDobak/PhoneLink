@@ -39,7 +39,7 @@ final class AdbAgent: ObservableObject {
     @Published private(set) var ready = false
     @Published private(set) var hotspotOn: Bool?
     @Published private(set) var hotspotName: String?
-    @Published private(set) var hotspotPassword: String?
+    private var hotspotPassword: String?
     @Published private(set) var sharingStarts = false
     /// Cleared only after the grace time. Requests should use can(_:), which has the real state.
     @Published private(set) var caps: Set<String> = []
@@ -62,8 +62,21 @@ final class AdbAgent: ObservableObject {
     private var nextId = 1
     private var pending: [Int: (JSON?) -> Void] = [:]
     private var bag: AnyCancellable?
+    /// Main thread.
     private var iconCache: [String: NSImage] = [:]
     private var iconWaiters: [String: [(NSImage?) -> Void]] = [:]
+
+    /// On queue. Unlike the published ready, it has no grace time.
+    private var readyLocked = false
+    /// The helper can stop and restart, e.g. after a crash on the phone. Keep the published state during this time
+    /// so menus and the sidebar do not flicker.
+    private static let graceTime: TimeInterval = 15
+    private var graceWork: DispatchWorkItem?
+    private var upSince: Date?
+    /// On queue. Doubles on each stop (5 s to 60 s), back to 5 s after the helper stays up for 60 s.
+    private var restartDelay = minRestartDelay
+    private static let minRestartDelay: TimeInterval = 5
+    private static let maxRestartDelay: TimeInterval = 60
 
     func start() {
         bag = PhoneLink.shared.$adbSerial.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] s in
@@ -111,7 +124,6 @@ final class AdbAgent: ObservableObject {
     func apps(system: Bool, done: @escaping ([PhoneApp]?) -> Void) {
         request(["t": "apps", "system": system], timeout: 30) { r in
             guard let list = r?["apps"] as? [JSON] else { done(nil); return }
-            NSLog("Phone Link: %d apps from the shell helper", list.count)
             done(list.compactMap(PhoneApp.init).sorted { $0.label.localizedStandardCompare($1.label) == .orderedAscending })
         }
     }
@@ -232,18 +244,6 @@ final class AdbAgent: ObservableObject {
             DispatchQueue.main.async { done(err) }
         }
     }
-
-    /// On queue. Unlike the published ready, it has no grace time.
-    private var readyLocked = false
-    /// The helper can stop and restart, e.g. after a crash on the phone. Keep the published state during this time
-    /// so menus and the sidebar do not flicker.
-    private static let graceTime: TimeInterval = 15
-    private var graceWork: DispatchWorkItem?
-    private var upSince: Date?
-    /// On queue. Doubles on each stop (5 s to 60 s), back to 5 s after the helper stays up for 60 s.
-    private var restartDelay = minRestartDelay
-    private static let minRestartDelay: TimeInterval = 5
-    private static let maxRestartDelay: TimeInterval = 60
 
     /// On queue. onReady always gets the real state. Published values change at once only when the helper
     /// becomes ready; after a stop they change after graceTime.

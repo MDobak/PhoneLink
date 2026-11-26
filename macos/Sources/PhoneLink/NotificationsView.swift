@@ -196,9 +196,7 @@ struct NotificationFeed: View {
     }
 
     private func copy(_ n: PhoneNotification) {
-        let s = [n.title, n.text].compactMap { $0 }.joined(separator: "\n")
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(s, forType: .string)
+        copyToPasteboard([n.title, n.text].compactMap { $0 }.joined(separator: "\n"))
     }
 
     private func reveal(_ key: String?, _ proxy: ScrollViewProxy) {

@@ -8,10 +8,12 @@ final class AdbScreen {
     static let shared = AdbScreen(port: 47801, socket: "phonelink-screen")
     private let localPort: UInt16
     private let socketName: String
+    private let queue: DispatchQueue
 
     init(port: UInt16, socket: String) {
         localPort = port + AdbManager.portOffset
         socketName = socket
+        queue = DispatchQueue(label: "phonelink.adbscreen." + socket)
     }
 
     /// Main thread.
@@ -21,7 +23,6 @@ final class AdbScreen {
     /// Main thread. The Bool is true if video arrived before the end.
     var onEnd: ((String?, Bool) -> Void)?
 
-    private lazy var queue = DispatchQueue(label: "phonelink.adbscreen." + socketName)
     private var process: Process?
     private var conn: NWConnection?
     private var generation = 0
@@ -34,7 +35,6 @@ final class AdbScreen {
             self.generation += 1
             let gen = self.generation
             self.gotVideo = false
-            // AdbManager.run has a timeout and does not wait on a pipe held open by an adb server.
             guard let adb = AdbManager.path,
                   AdbManager.run(["-s", serial, "forward", "tcp:\(self.localPort)", "localabstract:\(self.socketName)"])?.status == 0 else {
                 self.end(gen, "The Mac cannot reach the phone.")

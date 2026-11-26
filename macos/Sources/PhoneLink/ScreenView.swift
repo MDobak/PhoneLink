@@ -51,29 +51,8 @@ final class H264Renderer {
             }
         }
         if flags & 1 != 0 || format == nil { makeFormat() }
-        guard let format, !frame.isEmpty else { return }
-
-        var avcc = Data()
-        for nal in frame {
-            var len = UInt32(nal.count).bigEndian
-            avcc.append(Data(bytes: &len, count: 4))
-            avcc.append(nal)
-        }
-        var block: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: avcc.count,
-                                                 blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
-                                                 dataLength: avcc.count, flags: 0, blockBufferOut: &block) == noErr, let block else { return }
-        avcc.withUnsafeBytes { _ = CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: avcc.count) }
-        var sample: CMSampleBuffer?
-        var size = avcc.count
-        guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: 1,
-                                        sampleTimingEntryCount: 0, sampleTimingArray: nil, sampleSizeEntryCount: 1,
-                                        sampleSizeArray: &size, sampleBufferOut: &sample) == noErr, let sample else { return }
-        if let atts = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true), CFArrayGetCount(atts) > 0 {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
+        guard let format, !frame.isEmpty, let sample = Self.sample(nals: frame, format: format) else { return }
+        Self.setFlag(kCMSampleAttachmentKey_DisplayImmediately, on: sample)
         let r = layer.sampleBufferRenderer
         if r.status == .failed {
             r.flush()
@@ -81,6 +60,35 @@ final class H264Renderer {
             return
         }
         r.enqueue(sample)
+    }
+
+    /// One sample with length-prefixed NAL units. Without `pts` the sample has no timing.
+    static func sample(nals: [Data], format: CMVideoFormatDescription, pts: CMTime? = nil) -> CMSampleBuffer? {
+        var avcc = Data()
+        for nal in nals {
+            var len = UInt32(nal.count).bigEndian
+            avcc.append(Data(bytes: &len, count: 4))
+            avcc.append(nal)
+        }
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: avcc.count,
+                                                 blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+                                                 dataLength: avcc.count, flags: 0, blockBufferOut: &block) == noErr, let block else { return nil }
+        avcc.withUnsafeBytes { _ = CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: avcc.count) }
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: pts ?? .invalid, decodeTimeStamp: .invalid)
+        var size = avcc.count
+        var sample: CMSampleBuffer?
+        guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: 1,
+                                        sampleTimingEntryCount: pts == nil ? 0 : 1, sampleTimingArray: &timing, sampleSizeEntryCount: 1,
+                                        sampleSizeArray: &size, sampleBufferOut: &sample) == noErr else { return nil }
+        return sample
+    }
+
+    /// Sets a boolean sample attachment, such as kCMSampleAttachmentKey_NotSync, to true.
+    static func setFlag(_ key: CFString, on sample: CMSampleBuffer) {
+        guard let atts = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true), CFArrayGetCount(atts) > 0 else { return }
+        let dict = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFMutableDictionary.self)
+        CFDictionarySetValue(dict, Unmanaged.passUnretained(key).toOpaque(), Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
     }
 
     private func makeFormat() {
@@ -123,10 +131,10 @@ final class PhoneScreenNSView: NSView {
     /// A shorter interval only adds traffic.
     private static let sendInterval: TimeInterval = 0.008
 
-    init(renderer: H264Renderer, frame: NSRect = .zero) {
+    init(renderer: H264Renderer) {
         self.renderer = renderer
         tracksLockEntry = renderer === ScreenSession.shared.renderer
-        super.init(frame: frame)
+        super.init(frame: .zero)
         wantsLayer = true
         claimVideo()
     }
@@ -135,8 +143,9 @@ final class PhoneScreenNSView: NSView {
         self.init(renderer: ScreenSession.shared.renderer)
     }
 
-    /// Renderers share one video layer, so a view that appears later shows the stream at once.
-    /// The most recent view in a window gets it.
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Views of one renderer share its single layer. The newest view in a window takes it, so it shows the stream at once.
     private func claimVideo() {
         guard let l = layer, renderer.layer.superlayer !== l else { return }
         l.addSublayer(renderer.layer)
@@ -147,8 +156,6 @@ final class PhoneScreenNSView: NSView {
         super.viewDidMoveToWindow()
         if window != nil { claimVideo() }
     }
-
-    required init?(coder: NSCoder) { fatalError() }
 
     override func layout() {
         super.layout()
@@ -168,8 +175,6 @@ final class PhoneScreenNSView: NSView {
     }
 
     private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
-
-    // Touches are sent live as they happen. The phone does not wait for the gesture to end.
 
     private func sendTouch(_ action: String, _ p: (Double, Double)) {
         lastTouch = p
@@ -369,7 +374,7 @@ final class ScreenSession {
         let r = renderer
         link.videoSink = { flags, data in
             r.handle(flags: flags, data: data)
-            ScreenRecorder.shared.video(flags: flags, data: data, format: r.format)
+            ScreenRecorder.shared.video(data, format: r.format)
         }
         guard viewers == 1 else { return }
         switch link.screen {
@@ -814,6 +819,13 @@ struct SearchField: NSViewRepresentable {
 struct ScreenWindowView: View {
     @EnvironmentObject private var link: PhoneLink
     @EnvironmentObject private var router: Router
+    @State private var window: NSWindow?
+    @State private var contentWidth: CGFloat = 0
+
+    /// The scale now: the window width in points for each dp of the phone screen.
+    private var scale: CGFloat? {
+        link.screenDpWidth > 0 && contentWidth > 0 ? contentWidth / link.screenDpWidth : nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -823,10 +835,61 @@ struct ScreenWindowView: View {
         .frame(minWidth: WindowConfigurator.minWidth,
                minHeight: WindowConfigurator.minWidth / link.screenAspect + PhoneNavBar.height)
         .background(WindowConfigurator(aspect: link.screenAspect, extraHeight: PhoneNavBar.height))
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { contentWidth = g.size.width }
+                .onChange(of: g.size.width) { _, w in contentWidth = w }
+        })
+        .background(WindowAccessor { window = $0 })
         .onAppear { router.screenDetached = true }
         .onDisappear { router.screenDetached = false }
         .navigationTitle(link.phoneName.isEmpty ? "Phone Screen" : link.phoneName)
-        .toolbar { ToolbarItemGroup { ScreenCaptureButtons() } }
+        .toolbar {
+            ToolbarItemGroup { ScreenCaptureButtons() }
+            ToolbarItem {
+                ScaleMenu(scale: scale, help: "Window size. At 100%, the phone screen shows at its real size.") { s in
+                    guard let window, link.screenDpWidth > 0 else { return }
+                    WindowConfigurator.fit(window, aspect: link.screenAspect, extraHeight: PhoneNavBar.height, width: link.screenDpWidth * s)
+                }
+                .disabled(link.screenDpWidth == 0 || !link.isStreaming)
+            }
+        }
+    }
+}
+
+/// The scale steps of the phone screen window and the app windows.
+enum ScreenScale {
+    static let steps: [CGFloat] = [0.5, 0.75, 1, 1.25, 1.5, 2]
+    static func title(_ s: CGFloat) -> String { "\(Int((s * 100).rounded()))%" }
+    static func larger(than s: CGFloat) -> CGFloat? { steps.first { $0 > s + 0.01 } }
+    static func smaller(than s: CGFloat) -> CGFloat? { steps.last { $0 < s - 0.01 } }
+}
+
+/// A title bar menu that shows the scale now and sets a new one. Command-plus, Command-minus and Command-0 also work.
+struct ScaleMenu: View {
+    let scale: CGFloat?
+    let help: String
+    let set: (CGFloat) -> Void
+
+    var body: some View {
+        Menu {
+            Button("Actual Size") { set(1) }
+                .keyboardShortcut("0")
+            Button("Zoom In") { if let s = ScreenScale.larger(than: scale ?? 1) { set(s) } }
+                .keyboardShortcut("+")
+                .disabled(ScreenScale.larger(than: scale ?? 1) == nil)
+            Button("Zoom Out") { if let s = ScreenScale.smaller(than: scale ?? 1) { set(s) } }
+                .keyboardShortcut("-")
+                .disabled(ScreenScale.smaller(than: scale ?? 1) == nil)
+            Divider()
+            ForEach(ScreenScale.steps, id: \.self) { s in
+                Toggle(ScreenScale.title(s), isOn: Binding(get: { scale.map { abs($0 - s) < 0.01 } ?? false }, set: { _ in set(s) }))
+            }
+        } label: {
+            Text(scale.map(ScreenScale.title) ?? "Scale").monospacedDigit()
+        }
+        .help(help)
+        .accessibilityLabel("Scale")
     }
 }
 
@@ -877,34 +940,35 @@ private struct WindowConfigurator: NSViewRepresentable {
             window = nil
         }
 
-        /// Keeps the top-left corner.
         func fit() {
-            guard let w = window, aspect > 0, !w.styleMask.contains(.fullScreen), !w.inLiveResize else { return }
-            w.contentMinSize = NSSize(width: WindowConfigurator.minWidth,
-                                      height: WindowConfigurator.minWidth / aspect + extraHeight)
-            let content = w.contentLayoutRect.size
-            guard content.width > 0 else { return }
-            let width = max(content.width, WindowConfigurator.minWidth)
-            var height = width / aspect + extraHeight
-            var newWidth = width
-            // If too tall for the screen, make it narrower.
-            if let visible = w.screen?.visibleFrame {
-                let chrome = w.frame.height - content.height
-                let maxHeight = visible.height - chrome
-                if height > maxHeight, maxHeight > extraHeight {
-                    height = maxHeight
-                    newWidth = max(WindowConfigurator.minWidth, (height - extraHeight) * aspect)
-                    height = newWidth / aspect + extraHeight
-                }
-            }
-            let dw = newWidth - content.width
-            let dh = height - content.height
-            guard abs(dw) > 0.5 || abs(dh) > 0.5 else { return }
-            var f = w.frame
-            f.size.width += dw
-            f.size.height += dh
-            f.origin.y -= dh // keep the top edge
-            w.setFrame(f, display: true, animate: false)
+            guard let w = window else { return }
+            WindowConfigurator.fit(w, aspect: aspect, extraHeight: extraHeight)
         }
+    }
+
+    /// Fits the height to the width (or to a new width), and keeps the window on the screen. Keeps the top-left corner.
+    static func fit(_ w: NSWindow, aspect: CGFloat, extraHeight: CGFloat, width wanted: CGFloat? = nil) {
+        guard aspect > 0, !w.styleMask.contains(.fullScreen), !w.inLiveResize else { return }
+        w.contentMinSize = NSSize(width: minWidth, height: minWidth / aspect + extraHeight)
+        let content = w.contentLayoutRect.size
+        guard content.width > 0 else { return }
+        var width = max((wanted ?? content.width).rounded(), minWidth)
+        if let visible = w.screen?.visibleFrame {
+            width = min(width, visible.width - (w.frame.width - content.width))
+            // If too tall for the screen, make it narrower.
+            let maxHeight = visible.height - (w.frame.height - content.height)
+            if width / aspect + extraHeight > maxHeight, maxHeight > extraHeight {
+                width = max(minWidth, (maxHeight - extraHeight) * aspect)
+            }
+        }
+        let height = width / aspect + extraHeight
+        let dw = width - content.width
+        let dh = height - content.height
+        guard abs(dw) > 0.5 || abs(dh) > 0.5 else { return }
+        var f = w.frame
+        f.size.width += dw
+        f.size.height += dh
+        f.origin.y -= dh // keep the top edge
+        w.setFrame(f, display: true, animate: false)
     }
 }

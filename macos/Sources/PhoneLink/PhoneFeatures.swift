@@ -101,7 +101,7 @@ enum PhoneFeature: String, CaseIterable, Identifiable {
 
 enum AppNeed: Equatable {
     case session
-    /// A key the app does not report counts as allowed (older app versions).
+    /// A key that the app does not report counts as allowed.
     case perm(String)
     /// A missing key counts as not allowed.
     case reported(String)
@@ -270,7 +270,6 @@ enum FeatureChoice: String, CaseIterable, Identifiable {
     static let keyPrefix = "featureRoute."
     var id: String { rawValue }
     var path: PhonePath? { self == .app ? .app : self == .shell ? .shell : nil }
-
 }
 
 extension PhoneFeature {
@@ -453,15 +452,10 @@ final class PhoneFeatures: ObservableObject {
     func available(_ f: PhoneFeature) -> Bool { route(f).isAvailable }
     func reason(_ f: PhoneFeature) -> String? { route(f).reason }
     func path(_ f: PhoneFeature) -> PhonePath? { route(f).path }
-    /// Also true when a permission is off; the view then shows the reason.
-    func visible(_ f: PhoneFeature) -> Bool { PhoneLink.shared.shows(f) }
-    /// The route that "Automatic" gives now, for Settings.
-    func autoRoute(_ f: PhoneFeature) -> FeatureRoute { FeatureRouting.route(f, PhoneLink.shared.featureSnapshot, choice: .auto) }
 
     func setChoice(_ f: PhoneFeature, _ c: FeatureChoice) {
         objectWillChange.send()
         f.choice = c
         PhoneLink.shared.featureChoicesChanged()
     }
-
 }

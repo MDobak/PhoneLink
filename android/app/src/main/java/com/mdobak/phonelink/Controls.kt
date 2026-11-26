@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
@@ -25,6 +26,7 @@ import org.json.JSONObject
  */
 object Controls {
     private const val TAG = "PhoneLink"
+    private const val POLICY_TEXT = "Allow Do Not Disturb access for Phone Link on the phone, then try again."
 
     val STREAMS = linkedMapOf(
         "media" to AudioManager.STREAM_MUSIC,
@@ -47,8 +49,6 @@ object Controls {
         else -> throw IllegalStateException("This sound mode is not available.")
     }
 
-    private const val POLICY_TEXT = "Allow Do Not Disturb access for Phone Link on the phone, then try again."
-
     private val lock = Object()
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
@@ -58,7 +58,8 @@ object Controls {
     private var appCtx: Context? = null
     private var lastPush: String? = null
 
-    private val torchCamera: String? by lazy { findTorch() }
+    private var torchFound = false
+    @Volatile private var torchId: String? = null
     @Volatile private var torchOn: Boolean? = null
 
     fun start(ctx: Context, s: Session) = synchronized(lock) {
@@ -88,7 +89,7 @@ object Controls {
         if (torchCamera(app) != null) {
             val cb = object : CameraManager.TorchCallback() {
                 override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
-                    if (cameraId != torchCamera) return
+                    if (cameraId != torchId) return
                     if (torchOn != enabled) { torchOn = enabled; changed() }
                 }
             }
@@ -99,7 +100,7 @@ object Controls {
         }
     }
 
-    // No-op if a newer session owns the listeners.
+    /** Does nothing if a newer session owns the listeners. */
     fun stop(s: Session) = synchronized(lock) { if (session === s) stopLocked() }
 
     private fun stopLocked() {
@@ -136,10 +137,18 @@ object Controls {
         s.send(j)
     }
 
-    private fun torchCamera(ctx: Context): String? = try { torchCamera } catch (_: Exception) { null }
+    /** The camera with the flashlight, looked up once. */
+    private fun torchCamera(ctx: Context): String? = synchronized(lock) {
+        if (!torchFound) {
+            try {
+                torchId = findTorch(ctx)
+                torchFound = true
+            } catch (e: Exception) { Log.w(TAG, "torch: ${e.javaClass.simpleName}") }
+        }
+        torchId
+    }
 
-    private fun findTorch(): String? {
-        val ctx = appCtx ?: Hub.service ?: return null
+    private fun findTorch(ctx: Context): String? {
         val cm = ctx.getSystemService(CameraManager::class.java) ?: return null
         val withFlash = cm.cameraIdList.filter {
             cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
@@ -194,7 +203,7 @@ object Controls {
             }
         } catch (e: IllegalStateException) {
             throw e
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             Log.w(TAG, "controls set: SecurityException")
             throw IllegalStateException(POLICY_TEXT)
         } catch (e: Exception) {
@@ -228,7 +237,7 @@ object Controls {
         if (am.ringerMode == mode) return
         try {
             am.ringerMode = mode
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             throw IllegalStateException(
                 if (mode == AudioManager.RINGER_MODE_SILENT) "To use Silent, allow Do Not Disturb access for Phone Link on the phone."
                 else POLICY_TEXT)
@@ -241,7 +250,7 @@ object Controls {
         val cm = ctx.getSystemService(CameraManager::class.java)
         try {
             cm.setTorchMode(id, on)
-        } catch (e: android.hardware.camera2.CameraAccessException) {
+        } catch (_: CameraAccessException) {
             throw IllegalStateException("The flashlight is not available now. An app uses the camera.")
         }
         waitFor(500) { torchOn == on }
@@ -255,7 +264,7 @@ object Controls {
         val v = level.coerceIn(am.getStreamMinVolume(stream), am.getStreamMaxVolume(stream))
         try {
             am.setStreamVolume(stream, v, 0)
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             throw IllegalStateException("To turn this volume off, allow Do Not Disturb access for Phone Link on the phone.")
         }
     }

@@ -40,7 +40,7 @@ final class CallRecorder: ObservableObject {
     private var timer: DispatchSourceTimer?
     private let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false)!
 
-    static var folder: URL {
+    private static var folder: URL {
         FileManager.default.urls(for: .musicDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Phone Link/Call Recordings", isDirectory: true)
     }
@@ -60,7 +60,8 @@ final class CallRecorder: ObservableObject {
 
     func addKey(_ key: Character) {
         guard active.withLock({ $0 }) else { return }
-        queue.async { if self.file != nil { self.tones.append(contentsOf: Self.tone(key)) } }
+        guard let tone = DTMF.tone(key, sampleRate: Self.rate, seconds: 0.15, volume: 0.15) else { return }
+        queue.async { if self.file != nil { self.tones.append(contentsOf: tone) } }
     }
 
     private static func append(_ d: Data, to a: inout [Int16]) {
@@ -68,16 +69,6 @@ final class CallRecorder: ObservableObject {
         a.reserveCapacity(a.count + n)
         d.withUnsafeBytes { raw in
             for i in 0..<n { a.append(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: 2 * i, as: Int16.self))) }
-        }
-    }
-
-    private static func tone(_ key: Character) -> [Float] {
-        guard let f = DTMF.frequencies(key) else { return [] }
-        let n = Int(rate * 0.15)
-        let lo = 2 * Double.pi * f.low / rate, hi = 2 * Double.pi * f.high / rate
-        return (0..<n).map { s in
-            let fade = min(1, Double(min(s, n - s)) / 80)
-            return Float((sin(lo * Double(s)) + sin(hi * Double(s))) * 0.15 * fade)
         }
     }
 
@@ -135,7 +126,7 @@ final class CallRecorder: ObservableObject {
         let u = url
         active.withLock { $0 = false }
         queue.async {
-            // A start block may have run after the line above set active again.
+            // The start block can run after the line above and set active again.
             self.active.withLock { $0 = false }
             self.timer?.cancel()
             self.timer = nil
@@ -219,8 +210,14 @@ enum DTMF {
     private static let low: [Double] = [697, 697, 697, 770, 770, 770, 852, 852, 852, 941, 941, 941, 697, 770, 852, 941]
     private static let high: [Double] = [1209, 1336, 1477, 1209, 1336, 1477, 1209, 1336, 1477, 1209, 1336, 1477, 1633, 1633, 1633, 1633]
 
-    static func frequencies(_ key: Character) -> (low: Double, high: Double)? {
+    /// The two-frequency tone of a key, with short fades so it does not click. Nil for other characters.
+    static func tone(_ key: Character, sampleRate: Double, seconds: Double, volume: Double) -> [Float]? {
         guard let i = keys.firstIndex(of: key) else { return nil }
-        return (low[i], high[i])
+        let n = Int(sampleRate * seconds)
+        let lo = 2 * Double.pi * low[i] / sampleRate, hi = 2 * Double.pi * high[i] / sampleRate
+        return (0..<n).map { s in
+            let fade = min(1, Double(min(s, n - s)) / 80)
+            return Float((sin(lo * Double(s)) + sin(hi * Double(s))) * volume * fade)
+        }
     }
 }

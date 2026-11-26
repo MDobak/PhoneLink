@@ -70,6 +70,13 @@ object Shell {
         Class.forName("$stub\$Stub").getMethod("asInterface", android.os.IBinder::class.java).invoke(null, binder)
             ?: throw IllegalStateException("No interface $stub.")
 
+    /** A value from the settings provider. table: global, secure or system. */
+    fun setting(table: String, name: String): String? = try {
+        ShellContent.resolver.query(android.net.Uri.parse("content://settings/$table"), arrayOf("value"), "name=?", arrayOf(name), null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    } catch (_: Exception) { null }
+
     fun iconPng(pkg: String, size: Int): String {
         val d = context.packageManager.getApplicationIcon(pkg)
         val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)

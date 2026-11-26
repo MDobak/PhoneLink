@@ -42,7 +42,7 @@ object Bluetooth {
     val SERVICE: UUID = UUID.fromString("7a6c0001-5c3e-4f8b-9d6a-50484c4e4b31")
     val permissions = arrayOf(Manifest.permission.BLUETOOTH_ADVERTISE, Manifest.permission.BLUETOOTH_CONNECT)
     private const val TAG = "PhoneLink"
-    const val SLOT_MS = 15 * 60_000L
+    private const val SLOT_MS = 15 * 60_000L
     private const val NAME_BYTES = 10
 
     private val main = Handler(Looper.getMainLooper())
@@ -67,7 +67,7 @@ object Bluetooth {
         return k
     }
 
-    fun tag(key: ByteArray, slot: Long): ByteArray =
+    private fun tag(key: ByteArray, slot: Long): ByteArray =
         Crypto.hmac(key, "phonelink ble".toByteArray() + ByteBuffer.allocate(8).putLong(slot).array()).copyOf(8)
 
     /**
@@ -138,7 +138,7 @@ object Bluetooth {
     /** The first bytes of the name, cut at a character boundary. */
     private fun nameStart(name: String): ByteArray {
         var s = name
-        while (s.toByteArray().size > NAME_BYTES) s = s.dropLast(1)
+        while (s.toByteArray().size > NAME_BYTES) s = s.substring(0, s.offsetByCodePoints(s.length, -1))
         return s.toByteArray()
     }
 

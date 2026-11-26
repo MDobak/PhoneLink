@@ -3,13 +3,16 @@ package com.mdobak.phonelink
 import android.content.Context
 import android.content.Intent
 import android.database.ContentObserver
+import android.database.Cursor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
+import android.provider.Telephony
 import android.telephony.SmsManager
 import android.util.Base64
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -17,7 +20,7 @@ import java.io.File
 
 /** MMS ids are negative so they do not collide with SMS ids. */
 object Mms {
-    private val SMS: Uri = android.provider.Telephony.Sms.CONTENT_URI
+    private val SMS: Uri = Telephony.Sms.CONTENT_URI
     private val MMS = Uri.parse("content://mms")
     private val PART = Uri.parse("content://mms/part")
     private var observer: ContentObserver? = null
@@ -25,7 +28,7 @@ object Mms {
     @Volatile private var lastId = 0L
 
     fun threads(ctx: Context): JSONObject = try { conversations(ctx) } catch (e: Exception) {
-        android.util.Log.w("PhoneLink", "conversations failed, using SMS only", e)
+        Log.w("PhoneLink", "conversations failed, using SMS only", e)
         Sms.threads(ctx)
     }
 
@@ -97,7 +100,7 @@ object Mms {
 
     private val MMS_COLS = arrayOf("_id", "thread_id", "date", "msg_box", "read", "sub")
 
-    private fun mmsRow(ctx: Context, c: android.database.Cursor): JSONObject {
+    private fun mmsRow(ctx: Context, c: Cursor): JSONObject {
         val id = c.getLong(0)
         val box = c.getInt(3)
         val text = StringBuilder()
@@ -162,8 +165,8 @@ object Mms {
 
     /** Sends an MMS to a group or with a picture (base64, any image type). */
     @Suppress("DEPRECATION")
-    fun send(ctx: Context, to: List<String>, body: String, image: String?, done: (Boolean, String?) -> Unit) {
-        val sm = ctx.getSystemService(SmsManager::class.java)
+    fun send(ctx: Context, to: List<String>, body: String, image: String?, sim: Int = -1, done: (Boolean, String?) -> Unit) {
+        val sm = Sms.manager(ctx, sim)
         val max = try { sm.carrierConfigValues.getInt(SmsManager.MMS_CONFIG_MAX_MESSAGE_SIZE, 300 * 1024) } catch (_: Exception) { 300 * 1024 }
         val jpeg = image?.let { fitJpeg(Base64.decode(it, Base64.NO_WRAP), max - 8 * 1024) }
         if (image != null && jpeg == null) { done(false, "The picture cannot be read."); return }
@@ -248,7 +251,7 @@ object MmsPdu {
     fun sendReq(to: List<String>, text: String?, jpeg: ByteArray?): ByteArray {
         val o = ByteArrayOutputStream()
         o.write(0x8C); o.write(0x80)                                   // X-Mms-Message-Type: m-send-req
-        o.write(0x98); str(o, "T" + java.lang.Long.toHexString(System.currentTimeMillis())) // X-Mms-Transaction-ID
+        o.write(0x98); str(o, "T" + System.currentTimeMillis().toString(16))        // X-Mms-Transaction-ID
         o.write(0x8D); o.write(0x92)                                   // X-Mms-MMS-Version: 1.2
         o.write(0x89); o.write(0x01); o.write(0x81)                    // From: insert-address-token
         for (a in to) { o.write(0x97); str(o, a.filter { it.isDigit() || it == '+' } + "/TYPE=PLMN") } // To
@@ -256,14 +259,13 @@ object MmsPdu {
         o.write(0x86); o.write(0x81)                                   // X-Mms-Delivery-Report: no
         o.write(0x90); o.write(0x81)                                   // X-Mms-Read-Report: no
 
-        val q = '"'
         val smil = buildString {
             append("<smil><head><layout><root-layout/>")
-            if (jpeg != null) append("<region id=" + q + "Image" + q + " top=" + q + "0" + q + " left=" + q + "0" + q + " height=" + q + "80%" + q + " width=" + q + "100%" + q + " fit=" + q + "meet" + q + "/>")
-            if (text != null) append("<region id=" + q + "Text" + q + " top=" + q + "80%" + q + " left=" + q + "0" + q + " height=" + q + "20%" + q + " width=" + q + "100%" + q + "/>")
-            append("</layout></head><body><par dur=" + q + "5000ms" + q + ">")
-            if (jpeg != null) append("<img src=" + q + "image.jpg" + q + " region=" + q + "Image" + q + "/>")
-            if (text != null) append("<text src=" + q + "text.txt" + q + " region=" + q + "Text" + q + "/>")
+            if (jpeg != null) append("""<region id="Image" top="0" left="0" height="80%" width="100%" fit="meet"/>""")
+            if (text != null) append("""<region id="Text" top="80%" left="0" height="20%" width="100%"/>""")
+            append("""</layout></head><body><par dur="5000ms">""")
+            if (jpeg != null) append("""<img src="image.jpg" region="Image"/>""")
+            if (text != null) append("""<text src="text.txt" region="Text"/>""")
             append("</par></body></smil>")
         }.toByteArray()
 

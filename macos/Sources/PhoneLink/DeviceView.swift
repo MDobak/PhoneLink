@@ -137,8 +137,7 @@ final class DeviceInfoModel: ObservableObject {
     echo @@cycle; cat /sys/class/power_supply/battery/cycle_count /sys/class/power_supply/battery/battery_cycle 2>/dev/null
     """
 
-    private static var fullScript: String {
-        """
+    private static let fullScript = """
         for p in \(props.joined(separator: " ")); do echo "@$p=$(getprop $p)"; done
         echo "@name=$(settings get global device_name 2>/dev/null)"
         echo "@kernel=$(uname -r)"
@@ -155,7 +154,6 @@ final class DeviceInfoModel: ObservableObject {
         echo @@play; dumpsys package com.google.android.modulemetadata 2>/dev/null | grep -m1 versionName
         echo @@end
         """
-    }
 
     // MARK: Parsing
 
@@ -171,7 +169,7 @@ final class DeviceInfoModel: ObservableObject {
         return t
     }
 
-    static func parse(_ out: String, into i: inout DeviceInfo) {
+    private static func parse(_ out: String, into i: inout DeviceInfo) {
         var sections: [String: String] = [:]
         var p: [String: String] = [:]
         var current = ""

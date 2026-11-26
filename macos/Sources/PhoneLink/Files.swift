@@ -16,17 +16,15 @@ struct RemoteFile: Identifiable, Hashable {
     let mtime: Date
     var id: String { path }
 
-    init(name: String, path: String, dir: Bool, size: Int64, mtime: Date) {
-        self.name = name; self.path = path; self.dir = dir; self.size = size; self.mtime = mtime
-    }
+    var type: UTType? { dir ? .folder : UTType(filenameExtension: (name as NSString).pathExtension) }
+    var kind: String { dir ? "Folder" : (type?.localizedDescription ?? "Document") }
+}
 
+extension RemoteFile {
     init(_ j: JSON) {
         self.init(name: j.str("name") ?? "", path: j.str("path") ?? "", dir: j.bool("dir"),
                   size: j.i64("size") ?? 0, mtime: Date(ms: j.i64("mtime") ?? 0))
     }
-
-    var type: UTType? { dir ? .folder : UTType(filenameExtension: (name as NSString).pathExtension) }
-    var kind: String { dir ? "Folder" : (type?.localizedDescription ?? "Document") }
 }
 
 struct FileLocation: Identifiable, Hashable {
@@ -60,7 +58,8 @@ final class Transfer: ObservableObject, Identifiable {
 
 /// File browsing and transfers. The wire protocol is in Transfers.kt on the phone.
 /// Every path from the phone is resolved (symlinks too) and must stay inside a shared folder.
-final class FileHub: ObservableObject {
+/// UI state is main-thread only; transfer state is behind `lock`.
+final class FileHub: ObservableObject, @unchecked Sendable {
     static let shared = FileHub()
 
     private init() {
@@ -108,30 +107,37 @@ final class FileHub: ObservableObject {
 
     // MARK: Transfer state (any thread, guarded by lock)
 
-    private final class Sending {
-        var cancelled = false
+    /// The main thread, the link queue and the send queue all use it, so its state is behind a lock.
+    private final class Sending: @unchecked Sendable {
         let transfer: Transfer?
         private let lock = NSLock()
+        private var stopped = false
         /// nil on success, else the error text. Called off the main thread.
         var onDone: ((String?) -> Void)?
-        /// Both the link queue and the send queue can call this; only the first call counts.
+
+        init(_ t: Transfer?) { transfer = t }
+
+        var cancelled: Bool {
+            get { lock.withLock { stopped } }
+            set { lock.withLock { stopped = newValue } }
+        }
+
+        /// Only the first call counts.
         func complete(_ err: String?) {
-            lock.lock()
-            let d = onDone
-            onDone = nil
-            lock.unlock()
+            let d = lock.withLock { () -> ((String?) -> Void)? in
+                defer { onDone = nil }
+                return onDone
+            }
             d?(err)
         }
-        init(_ t: Transfer?) { transfer = t }
     }
 
-    /// Receives part of a phone file for the Finder drive. Called on the link queue.
+    /// Receives a phone file requested with read(path:offset:length:suffix:sink:). Called on the link queue.
     final class ReadSink {
         /// Total size, first byte, byte count.
         var onMeta: ((Int64, Int64, Int64) -> Void)?
         var onData: ((Data) -> Void)?
         var onEnd: ((FileError?) -> Void)?
-        fileprivate var started = false
     }
 
     private final class Incoming {
@@ -155,7 +161,6 @@ final class FileHub: ObservableObject {
 
     private let lock = NSLock()
     private var nextId: UInt32 = 0x8000_0000
-    private var pending: [UInt32: (JSON) -> Void] = [:]
     private var incoming: [UInt32: Incoming] = [:]
     private var sending: [UInt32: Sending] = [:]
     private var adbJobs: [UInt32: AdbProcess] = [:]
@@ -234,9 +239,10 @@ final class FileHub: ObservableObject {
 
     func handle(_ j: JSON) {
         let id = Self.id(j)
+        let type = j.str("t")
         if let sink = locked({ reads[id] }) { handleRead(id, sink, j); return }
-        if j.str("t") == "fs.result" || j.str("t") == "fs.error", let cb = locked({ calls.removeValue(forKey: id) }) { cb(j); return }
-        switch j.str("t") {
+        if type == "fs.result" || type == "fs.error", let cb = locked({ calls.removeValue(forKey: id) }) { cb(j); return }
+        switch type {
         case "fs.roots":
             let items: [JSON] = sharedRoots().map { ["name": FileManager.default.displayName(atPath: $0.path), "path": $0.path, "dir": true] }
             link.send(["t": "fs.result", "id": wire(id), "items": items])
@@ -256,16 +262,7 @@ final class FileHub: ObservableObject {
         case "fs.get": serve(id, path: j.str("path") ?? "")
         case "fs.put": receive(id, j)
         case "fs.end": finishIncoming(id)
-        case "fs.cancel":
-            let (s, inc) = locked { (sending.removeValue(forKey: id), incoming.removeValue(forKey: id)) }
-            s?.cancelled = true
-            // put(local:dir:name:replace:) waits for this call.
-            s?.complete("The phone stopped the copy.")
-            if let inc { abort(inc) }
-            if let t = s?.transfer ?? inc?.transfer { onMain { if t.isActive { t.state = .cancelled } } }
-
-        case "fs.result":
-            if let cb = locked({ pending.removeValue(forKey: id) }) { onMain { cb(j) } }
+        case "fs.cancel": stopCopy(id, error: nil)
         case "fs.meta":
             if let inc = locked({ incoming[id] }), let size = j.i64("size") {
                 inc.expected = size
@@ -276,15 +273,20 @@ final class FileHub: ObservableObject {
                 s.complete(nil)
                 if let t = s.transfer { onMain { t.state = .done; t.done = max(t.done, t.total) } }
             }
-        case "fs.error":
-            let msg = j.str("msg") ?? "Unknown error"
-            let (s, inc, cb) = locked { (sending.removeValue(forKey: id), incoming.removeValue(forKey: id), pending.removeValue(forKey: id)) }
-            s?.cancelled = true
-            s?.complete(msg)
-            if let inc { abort(inc) }
-            if let t = s?.transfer ?? inc?.transfer { onMain { t.state = .failed; t.error = msg } }
-            if let cb { onMain { cb(j) } }
+        case "fs.error": stopCopy(id, error: j.str("msg") ?? "Unknown error")
         default: break
+        }
+    }
+
+    /// The phone stopped a copy (error is nil) or the copy failed on the phone.
+    private func stopCopy(_ id: UInt32, error: String?) {
+        let (s, inc) = locked { (sending.removeValue(forKey: id), incoming.removeValue(forKey: id)) }
+        s?.cancelled = true
+        s?.complete(error ?? "The phone stopped the copy.")
+        if let inc { abort(inc) }
+        guard let t = s?.transfer ?? inc?.transfer else { return }
+        onMain {
+            if let error { t.state = .failed; t.error = error } else if t.isActive { t.state = .cancelled }
         }
     }
 
@@ -308,20 +310,19 @@ final class FileHub: ObservableObject {
         }
     }
 
+    /// Called on the link queue.
     func sessionEnded() {
-        let (ins, outs, cbs, sinks, waits) = locked { () -> ([Incoming], [Sending], [(JSON) -> Void], [ReadSink], [(JSON) -> Void]) in
-            defer { incoming = [:]; sending = [:]; pending = [:]; reads = [:]; calls = [:] }
-            return (Array(incoming.values), Array(sending.values), Array(pending.values), Array(reads.values), Array(calls.values))
+        let msg = "The phone disconnected."
+        let (ins, outs, sinks, waits) = locked { () -> ([Incoming], [Sending], [ReadSink], [(JSON) -> Void]) in
+            defer { incoming = [:]; sending = [:]; reads = [:]; calls = [:] }
+            return (Array(incoming.values), Array(sending.values), Array(reads.values), Array(calls.values))
         }
-        waits.forEach { $0(["t": "fs.error", "msg": "The phone disconnected."]) }
+        waits.forEach { $0(["t": "fs.error", "msg": msg]) }
         ins.forEach { abort($0) }
-        outs.forEach { $0.cancelled = true; $0.complete("The phone disconnected.") }
-        sinks.forEach { $0.onEnd?(FileError(msg: "The phone disconnected.")) }
+        outs.forEach { $0.cancelled = true; $0.complete(msg) }
+        sinks.forEach { $0.onEnd?(FileError(msg: msg)) }
         let ts = ins.compactMap(\.transfer) + outs.compactMap(\.transfer)
-        onMain {
-            ts.filter(\.isActive).forEach { $0.state = .failed; $0.error = "The phone disconnected." }
-            cbs.forEach { $0(["t": "fs.error", "msg": "The phone disconnected."]) }
-        }
+        onMain { ts.filter(\.isActive).forEach { $0.state = .failed; $0.error = msg } }
     }
 
     private func wire(_ id: UInt32) -> Int { Int(Int32(bitPattern: id)) }
@@ -367,7 +368,9 @@ final class FileHub: ObservableObject {
     private func stream(_ id: UInt32, url: URL, sending s: Sending) throws {
         let fh = try FileHandle(forReadingFrom: url)
         defer { try? fh.close() }
-        let window = DispatchSemaphore(value: 16)
+        // Start at 0: a semaphore that is freed below its start value stops the app.
+        let window = DispatchSemaphore(value: 0)
+        for _ in 0..<16 { window.signal() }
         var head = Data([3])
         var be = id.bigEndian
         head.append(Data(bytes: &be, count: 4))
@@ -399,19 +402,19 @@ final class FileHub: ObservableObject {
                 dir = Self.receiveFolder
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             }
-            let inc = try makeIncoming(dir: dir, name: name, expected: j.i64("size") ?? -1, toPhone: false, replyDone: true, open: false, id: id)
+            let inc = try makeIncoming(dir: dir, name: name, expected: j.i64("size") ?? -1, replyDone: true, open: false, id: id)
             locked { incoming[id] = inc }
         } catch { sendError(id, error) }
     }
 
-    private func makeIncoming(dir: URL, name: String, expected: Int64, toPhone: Bool, replyDone: Bool, open: Bool, id: UInt32,
+    private func makeIncoming(dir: URL, name: String, expected: Int64, replyDone: Bool, open: Bool, id: UInt32,
                               transfer: Transfer? = nil) throws -> Incoming {
         let tmp = dir.appendingPathComponent(".\(name).\(id).phonelink-part")
         guard FileManager.default.createFile(atPath: tmp.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
             throw FileError(msg: "Cannot save the file in \(dir.lastPathComponent).")
         }
         let fh = try FileHandle(forWritingTo: tmp)
-        let t = transfer ?? Transfer(id: id, name: name, toPhone: toPhone, total: expected)
+        let t = transfer ?? Transfer(id: id, name: name, toPhone: false, total: expected)
         if transfer == nil { onMain { self.transfers.insert(t, at: 0) } } else { onMain { t.done = 0 } }
         return Incoming(handle: fh, tmp: tmp, dir: dir, name: name, expected: expected, transfer: t, replyDone: replyDone, openWhenDone: open)
     }
@@ -447,29 +450,21 @@ final class FileHub: ObservableObject {
 
     // MARK: Browse the phone (main thread)
 
-    private func request(_ t: String, path: String?, _ cb: @escaping (JSON) -> Void) {
-        guard link.sessionConnected else { cb(["t": "fs.error", "msg": "The phone is not connected."]); return }
-        let id = newId()
-        locked { pending[id] = cb }
-        var j: JSON = ["t": t, "id": wire(id)]
-        if let path { j["path"] = path }
-        link.send(j)
-    }
-
     func loadRoots() {
         if PhoneLink.isDemo { return }
-        request("fs.roots", path: nil) { r in
-            if r.str("t") == "fs.error" {
-                self.rootsError = FileError(msg: r.str("msg") ?? "Unknown error", code: r.str("code"))
-                self.roots = []
-                return
+        Task { @MainActor in
+            do {
+                let r = try await call(["t": "fs.roots"])
+                rootsError = nil
+                roots = (r["items"] as? [JSON] ?? []).map {
+                    let f = RemoteFile($0)
+                    return FileLocation(name: f.name, path: f.path, symbol: f.name == "Internal storage" ? "internaldrive" : "sdcard")
+                }
+                if location == nil, let first = roots.first { go(first) }
+            } catch {
+                rootsError = (error as? FileError) ?? FileError(msg: error.localizedDescription)
+                roots = []
             }
-            self.rootsError = nil
-            self.roots = (r["items"] as? [JSON] ?? []).map {
-                let f = RemoteFile($0)
-                return FileLocation(name: f.name, path: f.path, symbol: f.name == "Internal storage" ? "internaldrive" : "sdcard")
-            }
-            if self.location == nil, let first = self.roots.first { self.go(first) }
         }
     }
 
@@ -489,6 +484,8 @@ final class FileHub: ObservableObject {
     }
 
     func back() { guard canGoBack else { return }; historyIndex -= 1; load(history[historyIndex]) }
+    func forward() { guard canGoForward else { return }; historyIndex += 1; load(history[historyIndex]) }
+    func reload() { if let l = location { load(l) } }
 
     var parentLocation: FileLocation? {
         guard let l = location, !l.path.hasPrefix("media:"), !roots.contains(where: { $0.path == l.path }) else { return nil }
@@ -510,25 +507,25 @@ final class FileHub: ObservableObject {
         let rest = path.dropFirst(r.path.count).split(separator: "/").map(String.init)
         return ([r.name] + rest).joined(separator: " › ")
     }
-    func forward() { guard canGoForward else { return }; historyIndex += 1; load(history[historyIndex]) }
-    func reload() { if let l = location { load(l) } }
 
     private func load(_ loc: FileLocation) {
         location = loc
         if PhoneLink.isDemo { return }
         loading = true
         error = nil
-        request("fs.list", path: loc.path) { r in
-            guard self.location == loc else { return }
-            self.loading = false
-            if r.str("t") == "fs.error" {
-                self.error = r.str("msg")
-                self.items = []
-                self.writable = false
-            } else {
-                self.items = (r["items"] as? [JSON] ?? []).map(RemoteFile.init).filter { !$0.name.hasPrefix(".") }
-                self.writable = r.bool("writable")
+        Task { @MainActor in
+            do {
+                let r = try await call(["t": "fs.list", "path": loc.path])
+                guard location == loc else { return }
+                items = (r["items"] as? [JSON] ?? []).map(RemoteFile.init).filter { !$0.name.hasPrefix(".") }
+                writable = r.bool("writable")
+            } catch {
+                guard location == loc else { return }
+                self.error = (error as? FileError)?.msg ?? error.localizedDescription
+                items = []
+                writable = false
             }
+            loading = false
         }
     }
 
@@ -541,10 +538,11 @@ final class FileHub: ObservableObject {
     /// Copies one phone file to a new temporary folder, with no transfer list entry.
     /// path can be "media:<id>" for a photo. Calls done on the main thread.
     func fetch(path: String, name: String, done: @escaping (URL?) -> Void) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("PhoneLink-" + UUID().uuidString, isDirectory: true)
+        let safe = Self.safeName(name)
         // Without the app session, photos come from the media store over adb.
         if !link.sessionConnected, path.hasPrefix("media:"), let serial = link.adbSerial, let mid = Int64(path.dropFirst(6)) {
-            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("PhoneLink-" + UUID().uuidString, isDirectory: true)
-            let out = dir.appendingPathComponent(Self.safeName(name))
+            let out = dir.appendingPathComponent(safe)
             DispatchQueue.global(qos: .userInitiated).async {
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 let ok = AdbFiles.readMedia(serial: serial, id: mid, to: out)
@@ -552,12 +550,10 @@ final class FileHub: ObservableObject {
             }
             return
         }
-        guard link.sessionConnected else { done(nil); return }
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("PhoneLink-" + UUID().uuidString, isDirectory: true)
+        guard linkError("fs.get") == nil else { done(nil); return }
         let id = newId()
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let safe = Self.safeName(name)
             let tmp = dir.appendingPathComponent(".\(safe).part")
             guard FileManager.default.createFile(atPath: tmp.path, contents: nil) else { throw FileError(msg: "Cannot save the file.") }
             let inc = Incoming(handle: try FileHandle(forWritingTo: tmp), tmp: tmp, dir: dir, name: safe, expected: -1,
@@ -588,8 +584,8 @@ final class FileHub: ObservableObject {
     private func netDownload(path: String, dir: URL, name: String, size: Int64, open: Bool, id: UInt32, transfer: Transfer?) {
         do {
             // Without a session the transfer would stay active forever.
-            if !link.sessionConnected { throw FileError(msg: "The phone is not connected.") }
-            let inc = try makeIncoming(dir: dir, name: name, expected: size, toPhone: false, replyDone: false, open: open, id: id, transfer: transfer)
+            if let e = linkError("fs.get") { throw e }
+            let inc = try makeIncoming(dir: dir, name: name, expected: size, replyDone: false, open: open, id: id, transfer: transfer)
             locked { incoming[id] = inc }
             link.send(["t": "fs.get", "id": wire(id), "path": path])
         } catch {
@@ -640,6 +636,7 @@ final class FileHub: ObservableObject {
 
     func upload(_ urls: [URL], to dir: String?) {
         guard link.sessionConnected else { link.banner = link.state == .connected ? "Sending files needs Phone Link on the phone." : "The phone is not connected."; return }
+        if let e = linkError("fs.put") { link.banner = e.msg; return }
         let files = urls.filter { !$0.hasDirectoryPath && FileManager.default.fileExists(atPath: $0.path) }
         if files.count < urls.count { link.banner = "Phone Link copies files only. To copy a folder, compress it first." }
         let serial = usbSerial
@@ -717,8 +714,18 @@ final class FileHub: ObservableObject {
 
     // MARK: Requests for any thread (Finder drive and file operations)
 
+    /// Why a request of this type cannot go to the phone now. PhoneLink.send drops file requests on Bluetooth, so
+    /// without this check the request and its data go nowhere and the caller waits forever.
+    private func linkError(_ type: String) -> FileError? {
+        guard link.isSessionOpen else { return FileError(msg: "The phone is not connected.") }
+        guard !link.isTooSlow(type) else { return FileError(msg: Self.bluetoothMessage) }
+        return nil
+    }
+
+    static let bluetoothMessage = "Files cannot go over Bluetooth because it is too slow. Connect the phone through Wi-Fi or a USB cable."
+
     func call(_ msg: JSON, timeout: TimeInterval = 120) async throws -> JSON {
-        guard link.isSessionOpen else { throw FileError(msg: "The phone is not connected.") }
+        if let e = linkError(msg.str("t") ?? "") { throw e }
         let id = newId()
         return try await withCheckedThrowingContinuation { (c: CheckedContinuation<JSON, Error>) in
             let once = NSLock()
@@ -751,7 +758,7 @@ final class FileHub: ObservableObject {
     @discardableResult
     func read(path: String, offset: Int64?, length: Int64?, suffix: Int64?, sink: ReadSink) -> UInt32 {
         let id = newId()
-        guard link.isSessionOpen else { sink.onEnd?(FileError(msg: "The phone is not connected.")); return id }
+        if let e = linkError("fs.get") { sink.onEnd?(e); return id }
         locked { reads[id] = sink }
         var j: JSON = ["t": "fs.get", "id": wire(id), "path": path]
         if let suffix { j["suffix"] = suffix } else { j["offset"] = offset ?? 0; if let length { j["length"] = length } }
@@ -768,7 +775,6 @@ final class FileHub: ObservableObject {
         switch j.str("t") {
         case "fs.meta":
             let size = j.i64("size") ?? -1
-            sink.started = true
             sink.onMeta?(size, j.i64("offset") ?? 0, j.i64("length") ?? size)
         case "fs.end":
             locked { _ = reads.removeValue(forKey: id) }
@@ -781,7 +787,7 @@ final class FileHub: ObservableObject {
     }
 
     func put(local: URL, dir: String, name: String, replace: Bool) async throws {
-        guard link.isSessionOpen else { throw FileError(msg: "The phone is not connected.") }
+        if let e = linkError("fs.put") { throw e }
         let size = Int64((try? local.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         let id = newId()
         let s = Sending(nil)
@@ -883,12 +889,12 @@ final class FileHub: ObservableObject {
         }
     }
 
-    func info(_ path: String, deep: Bool) async throws -> (RemoteFile, created: Date?, count: Int64?, free: Int64?, total: Int64?) {
-        if PhoneLink.isDemo, let f = items.first(where: { $0.path == path }) { return (f, nil, nil, nil, nil) }
-        let r = try await call(["t": "fs.stat", "path": path, "deep": deep], timeout: 30)
+    /// count is the number of items in a folder.
+    func info(_ path: String) async throws -> (file: RemoteFile, created: Date?, count: Int64?) {
+        if PhoneLink.isDemo, let f = items.first(where: { $0.path == path }) { return (f, nil, nil) }
+        let r = try await call(["t": "fs.stat", "path": path, "deep": true], timeout: 30)
         let it = r["item"] as? JSON ?? [:]
-        let f = RemoteFile(it)
-        return (f, it.i64("ctime").map { Date(ms: $0) }, it.i64("count"), r.i64("free"), r.i64("total"))
+        return (RemoteFile(it), it.i64("ctime").map { Date(ms: $0) }, it.i64("count"))
     }
 
     func folders(in path: String) async throws -> [RemoteFile] {

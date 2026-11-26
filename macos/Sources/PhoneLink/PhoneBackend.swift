@@ -13,18 +13,16 @@ enum PhoneRouter {
         PhoneFeature.allCases.contains { f in f.spec.shell != nil && (f.choice == .auto || f.choice == .shell) }
     }
 
-    /// Types not in the table go to the app only.
-    static func feature(_ type: String) -> PhoneFeature? { PhoneFeature.forRequest(type) }
-
     static func canRetry(_ type: String, from failed: PhonePath) -> Bool {
-        guard let f = feature(type), f.choice == .auto else { return false }
+        guard let f = PhoneFeature.forRequest(type), f.choice == .auto else { return false }
         let spec = f.spec
         guard spec.retry else { return false }
         return failed == .app ? spec.shell != nil : spec.app != nil
     }
 
     static func decide(_ type: String, session: Bool, perms: [String: Bool], shellCan: Bool) -> PhonePath? {
-        guard let f = feature(type) else { return session ? .app : nil }
+        // Types not in the table go to the app only.
+        guard let f = PhoneFeature.forRequest(type) else { return session ? .app : nil }
         let s = LinkSnapshot(session: session, perms: perms, debugging: usesDebugging, adbLinked: shellCan,
                              helperCan: { _ in shellCan }, adbScreen: shellCan, callAudio: shellCan)
         return FeatureRouting.route(f, s, lastResort: true).path

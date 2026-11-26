@@ -28,7 +28,8 @@ class ScreenStreamer(
     private val dm = svc.getSystemService(DisplayManager::class.java)
     private val main = Handler(Looper.getMainLooper())
     private var display: VirtualDisplay? = null
-    private var codec: MediaCodec? = null
+    /** The current encoder. Drain threads compare it with their own encoder. */
+    @Volatile private var codec: MediaCodec? = null
     private var width = 0
     private var height = 0
     @Volatile private var running = false
@@ -44,10 +45,10 @@ class ScreenStreamer(
     }
 
     @Suppress("DEPRECATION")
+    private fun metrics() = DisplayMetrics().also { dm.getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(it) }
+
     private fun size(): Triple<Int, Int, Int> {
-        val d = dm.getDisplay(Display.DEFAULT_DISPLAY)
-        val m = DisplayMetrics()
-        d.getRealMetrics(m)
+        val m = metrics()
         val scale = minOf(1.0, maxSize.toDouble() / max(m.widthPixels, m.heightPixels))
         fun even8(v: Double) = max(8, (v / 8).roundToInt() * 8)
         return Triple(even8(m.widthPixels * scale), even8(m.heightPixels * scale), max(120, (m.densityDpi * scale).toInt()))
@@ -81,10 +82,11 @@ class ScreenStreamer(
     private fun restartEncoder() {
         val old = codec
         var c: MediaCodec? = null
+        var surface: Surface? = null
         try {
             val (w, h, dpi) = size()
             c = newEncoder(w, h)
-            val surface = c.createInputSurface()
+            surface = c.createInputSurface()
             display?.resize(w, h, dpi)
             display?.setSurface(surface)
             try { old?.signalEndOfInputStream() } catch (_: Exception) {}
@@ -94,6 +96,7 @@ class ScreenStreamer(
             Log.w("PhoneLink", "encoder restart failed", e)
             // The drain thread did not start, so nothing else releases the new encoder.
             c?.release()
+            surface?.release()
             svc.stopScreen()
         }
     }
@@ -120,7 +123,13 @@ class ScreenStreamer(
     }
 
     fun sendInfo() {
-        Hub.send(json("t" to "screen.state", "state" to "streaming", "width" to width, "height" to height))
+        Hub.send(json("t" to "screen.state", "state" to "streaming", "width" to width, "height" to height, "dpWidth" to dpWidth()))
+    }
+
+    /** The width of the phone screen in dp. The Mac uses it for the window scale (100% = 1 dp for each Mac point). */
+    private fun dpWidth(): Int {
+        val m = metrics()
+        return if (m.densityDpi > 0) m.widthPixels * 160 / m.densityDpi else 0
     }
 
     private fun drain(c: MediaCodec, surface: Surface) = thread(name = "phonelink-enc") {

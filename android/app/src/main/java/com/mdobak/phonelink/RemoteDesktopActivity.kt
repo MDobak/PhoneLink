@@ -60,6 +60,8 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
 
     private lateinit var root: FrameLayout
     private lateinit var video: TextureView
+    /** Hides the video until it is interactive. The video view itself stays visible, else Android gives it no surface. */
+    private lateinit var cover: View
     private lateinit var input: InputSurface
     private lateinit var toolbar: LinearLayout
     private lateinit var handle: View
@@ -74,6 +76,7 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
     private lateinit var overlayAction: Button
     private lateinit var keysScroll: HorizontalScrollView
     private val modViews = arrayOfNulls<TextView>(4)
+    private val modNames = arrayOf("Command", "Option", "Control", "Shift")
 
     private val handler = Handler(Looper.getMainLooper())
     private var videoSurface: Surface? = null
@@ -112,6 +115,7 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
     private var vt: VelocityTracker? = null
     private var magnifier: Magnifier? = null
     private var momVx = 0f; private var momVy = 0f; private var momLast = 0L
+    private var momActive = false
     private var mouseClicks = 1; private var mouseLastPress = 0L; private var mouseLastButton = ""
     private val slop by lazy { ViewConfiguration.get(this).scaledTouchSlop.toFloat() }
 
@@ -161,6 +165,8 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
             }
         }
         root.addView(video, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        cover = View(this).apply { setBackgroundColor(Color.BLACK) }
+        root.addView(cover, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         input = InputSurface()
         root.addView(input, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         buildKeysBar()
@@ -348,7 +354,7 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
         overlayText.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
         overlayAction.visibility = if (action != null) View.VISIBLE else View.GONE
         overlayAction.text = action ?: ""
-        video.visibility = if (interactive()) View.VISIBLE else View.INVISIBLE
+        cover.visibility = if (interactive()) View.GONE else View.VISIBLE
         handle.visibility = if (interactive() && !toolbarShown) View.VISIBLE else View.GONE
         if (!interactive()) { setToolbar(false); hideLoupe() }
         displayButton.visibility = if (RemoteDesktop.displays.size > 1) View.VISIBLE else View.GONE
@@ -356,8 +362,6 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
         modeButton.contentDescription = if (trackpad) "Switch to touch" else "Switch to trackpad"
         modeButton.tooltipText = modeButton.contentDescription
     }
-
-    private fun sysColor(id: Int) = getColor(id)
 
     private fun pill(colorInt: Int, radius: Int) = GradientDrawable().apply { setColor(colorInt); cornerRadius = dp(radius).toFloat() }
 
@@ -369,7 +373,7 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
         }
         overlaySpinner = ProgressBar(this).apply {
             isIndeterminate = true
-            indeterminateTintList = ColorStateList.valueOf(sysColor(android.R.color.system_accent1_200))
+            indeterminateTintList = ColorStateList.valueOf(getColor(android.R.color.system_accent1_200))
         }
         overlay.addView(overlaySpinner, LinearLayout.LayoutParams(dp(36), dp(36)).apply { bottomMargin = dp(20) })
         overlayTitle = TextView(this).apply {
@@ -400,8 +404,10 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
         isAllCaps = false
         textSize = 15f
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        setTextColor(if (filled) sysColor(android.R.color.system_accent1_900) else sysColor(android.R.color.system_accent1_200))
-        background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), if (filled) pill(sysColor(android.R.color.system_accent1_200), 24) else null, pill(Color.WHITE, 24))
+        setTextColor(if (filled) getColor(android.R.color.system_accent1_900) else getColor(android.R.color.system_accent1_200))
+        background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), if (filled) pill(getColor(android.R.color.system_accent1_200), 24) else null, pill(Color.WHITE, 24))
+        gravity = Gravity.CENTER
+        includeFontPadding = false
         setPadding(dp(24), 0, dp(24), 0)
         minWidth = dp(120); minimumWidth = dp(120)
         stateListAnimator = null
@@ -575,9 +581,8 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
         add(keyView("esc", "Escape").apply { setOnClickListener { haptic(it); keys.typeKey(MacKeys.ESCAPE) } })
         add(keyView("tab", "Tab").apply { setOnClickListener { haptic(it); keys.typeKey(MacKeys.TAB) } })
         val symbols = arrayOf("⌘", "⌥", "⌃", "⇧")
-        val names = arrayOf("Command", "Option", "Control", "Shift")
         for (i in 0..3) {
-            val v = keyView(symbols[i], names[i]).apply { textSize = 18f; setOnClickListener { haptic(it); keys.tapMod(i) } }
+            val v = keyView(symbols[i], modNames[i]).apply { textSize = 18f; setOnClickListener { haptic(it); keys.tapMod(i) } }
             modViews[i] = v
             add(v)
         }
@@ -637,7 +642,6 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
     private fun haptic(v: View) { v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP) }
 
     private fun updateMods() {
-        val names = arrayOf("Command", "Option", "Control", "Shift")
         for (i in 0..3) {
             val v = modViews[i] ?: continue
             val state = keys.modState(i)
@@ -649,7 +653,7 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
             v.background = RippleDrawable(ColorStateList.valueOf(color(R.color.outline)), rounded(bg, 10), null)
             v.setTextColor(color(fg))
             v.paint.isUnderlineText = state == 2
-            v.contentDescription = names[i] + when (state) { 1 -> ", on for the next key"; 2 -> ", locked"; else -> "" }
+            v.contentDescription = modNames[i] + when (state) { 1 -> ", on for the next key"; 2 -> ", locked"; else -> "" }
             v.invalidate()
         }
     }
@@ -1043,7 +1047,7 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
             RemoteDesktop.pointer(nx, ny, "down", "right")
             RemoteDesktop.pointer(nx, ny, "up", "right")
         }
-        input.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+        tick()
     }
 
     private fun releaseHeld() {
@@ -1064,8 +1068,6 @@ class RemoteDesktopActivity : UiActivity(), RemoteDesktop.Listener {
         momActive = true
         handler.postDelayed(momentum, 16)
     }
-
-    private var momActive = false
 
     private val momentum = object : Runnable {
         override fun run() {

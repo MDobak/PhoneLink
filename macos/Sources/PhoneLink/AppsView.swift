@@ -197,7 +197,7 @@ final class AppsModel: ObservableObject {
     // MARK: Commands
 
     /// `check` decides if the output means success. By default any output does.
-    func run(_ pkg: String, _ args: [String], failure: String, check: ((String) -> Bool)? = nil,
+    private func run(_ pkg: String, _ args: [String], failure: String, check: ((String) -> Bool)? = nil,
              reloadAfter: Bool = false, done: @escaping (String?) -> Void) {
         busy.insert(pkg)
         AdbAgent.shared.shell(args, timeout: 60) { [weak self] out in
@@ -316,10 +316,7 @@ private struct AppMenuItems: View {
             Button("Force Stop") { model.forceStop(app, done: report) }
             Button("Show App Info on Phone") { model.showOnPhone(app, done: report) }
             Divider()
-            Button("Copy Package Name") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(app.pkg, forType: .string)
-            }
+            Button("Copy Package Name") { copyToPasteboard(app.pkg) }
             Divider()
             Button("Clear Data…", role: .destructive) { state.confirmClear = app }
             if app.canUninstall {
@@ -408,7 +405,6 @@ struct InstallProgressOverlay: View {
 // MARK: - List
 
 struct AppsList: View {
-    @EnvironmentObject private var link: PhoneLink
     @ObservedObject private var features = PhoneFeatures.shared
     @ObservedObject private var model = AppsModel.shared
     @ObservedObject private var agent = AdbAgent.shared
@@ -568,10 +564,7 @@ struct AppDetail: View {
                         Button("Force Stop") { model.forceStop(app, done: report) }
                         Button("Show App Info on Phone") { model.showOnPhone(app, done: report) }
                         Divider()
-                        Button("Copy Package Name") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(app.pkg, forType: .string)
-                        }
+                        Button("Copy Package Name") { copyToPasteboard(app.pkg) }
                     } label: {
                         Label("More", systemImage: "ellipsis")
                     }

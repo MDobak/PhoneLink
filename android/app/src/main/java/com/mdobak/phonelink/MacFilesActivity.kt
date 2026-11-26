@@ -3,6 +3,7 @@ package com.mdobak.phonelink
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Typeface
+import android.graphics.drawable.RippleDrawable
 import android.os.Build
 import android.os.Bundle
 import android.text.TextUtils
@@ -26,7 +27,8 @@ import org.json.JSONObject
 class MacFilesActivity : UiActivity() {
     private class Place(val name: String, val path: String?)
 
-    private val stack = ArrayList<Place>()       // empty path = the list of shared folders
+    /** A place with no path is the list of shared folders. */
+    private val stack = ArrayList<Place>()
     private var items: List<RemoteFile> = emptyList()
     private var writable = false
     private var loading = false
@@ -49,6 +51,8 @@ class MacFilesActivity : UiActivity() {
             setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_upload, 0, 0, 0)
             compoundDrawableTintList = ColorStateList.valueOf(color(R.color.on_primary_container))
             compoundDrawablePadding = dp(12)
+            gravity = Gravity.CENTER
+            includeFontPadding = false
             setPadding(dp(16), 0, dp(20), 0)
             minHeight = dp(56); minimumHeight = dp(56)
             setOnClickListener { pick() }
@@ -113,22 +117,18 @@ class MacFilesActivity : UiActivity() {
         if (place.path == null) Transfers.request("fs.roots", null, cb) else Transfers.request("fs.list", place.path, cb)
     }
 
-    private val pickCode = 7
-
     private fun pick() {
         startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-            .setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true), pickCode)
+            .setType("*/*").putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true), PICK_FILES)
     }
 
     @Deprecated("Plain activity result API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != pickCode || resultCode != RESULT_OK || data == null) return
+        if (requestCode != PICK_FILES || resultCode != RESULT_OK || data == null) return
         val uris = data.clipData?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).uri } } ?: listOfNotNull(data.data)
         val dir = stack.last().path ?: return
-        if (!Transfers.upload(Transfers.open(this, uris), dir)) {
-            Toast.makeText(this, "Not connected to your Mac.", Toast.LENGTH_SHORT).show()
-        }
+        Transfers.upload(Transfers.open(this, uris), dir)?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
     }
 
     private fun render() {
@@ -144,7 +144,7 @@ class MacFilesActivity : UiActivity() {
         bar.addView(ImageButton(this).apply {
             setImageResource(R.drawable.ic_arrow_back)
             imageTintList = ColorStateList.valueOf(color(R.color.on_surface))
-            background = android.graphics.drawable.RippleDrawable(ColorStateList.valueOf(color(R.color.outline)), null, rounded(R.color.surface, 24))
+            background = RippleDrawable(ColorStateList.valueOf(color(R.color.outline)), null, rounded(R.color.surface, 24))
             contentDescription = "Back"
             setOnClickListener { goBack() }
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
@@ -200,23 +200,21 @@ class MacFilesActivity : UiActivity() {
     }
 
     private fun fileRow(f: RemoteFile): View {
-        val sub = if (f.dir) DateUtils.formatDateTime(this, f.mtime, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_MONTH)
-                  else Formatter.formatShortFileSize(this, f.size) + " · " +
-                      DateUtils.formatDateTime(this, f.mtime, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_MONTH)
+        val date = DateUtils.formatDateTime(this, f.mtime, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_ABBREV_MONTH)
+        val sub = if (f.dir) date else Formatter.formatShortFileSize(this, f.size) + " · " + date
         val trailing = if (f.dir) null else ImageView(this).apply {
             setImageResource(R.drawable.ic_download)
             imageTintList = ColorStateList.valueOf(color(R.color.on_surface_variant))
             contentDescription = "Download"
             layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
         }
-        val r = row(if (f.dir) R.drawable.ic_folder else R.drawable.ic_file, f.name, if (f.mtime > 0) sub else null, trailing) {
+        return row(if (f.dir) R.drawable.ic_folder else R.drawable.ic_file, f.name, if (f.mtime > 0) sub else null, trailing) {
             if (f.dir) open(Place(f.name, f.path))
             else {
-                Transfers.download(this, f)
-                Toast.makeText(this, "Downloading to Download/Phone Link", Toast.LENGTH_SHORT).show()
+                val error = Transfers.download(this, f)
+                Toast.makeText(this, error ?: "Downloading to Download/Phone Link", Toast.LENGTH_SHORT).show()
             }
         }
-        return r
     }
 
     private fun renderTransfers() {
@@ -231,11 +229,11 @@ class MacFilesActivity : UiActivity() {
             }
             box.addView(label(t.name, 16f).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.MIDDLE })
             val status = when (t.state) {
-                "active" -> (if (t.upload) "Sending" else "Receiving") +
+                Transfers.State.ACTIVE -> (if (t.upload) "Sending" else "Receiving") +
                     (if (t.total > 0) " · " + Formatter.formatShortFileSize(this, t.done) + " of " + Formatter.formatShortFileSize(this, t.total) else "")
-                "done" -> if (t.upload) "Sent" else "Saved in Download/Phone Link"
-                "cancelled" -> "Cancelled"
-                else -> t.error ?: "Failed"
+                Transfers.State.DONE -> if (t.upload) "Sent" else "Saved in Download/Phone Link"
+                Transfers.State.CANCELLED -> "Cancelled"
+                Transfers.State.FAILED -> t.error ?: "Failed"
             }
             if (t.active) box.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
                 max = 1000
@@ -243,7 +241,7 @@ class MacFilesActivity : UiActivity() {
                 progress = if (t.total > 0) (t.done * 1000 / t.total).toInt() else 0
                 progressTintList = ColorStateList.valueOf(color(R.color.primary))
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(4)).apply { topMargin = dp(8); bottomMargin = dp(6) })
-            box.addView(label(status, 13f, if (t.state == "failed") R.color.error else R.color.on_surface_variant))
+            box.addView(label(status, 13f, if (t.state == Transfers.State.FAILED) R.color.error else R.color.on_surface_variant))
             val r = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -266,5 +264,9 @@ class MacFilesActivity : UiActivity() {
         } else {
             content.addView(View(this), LinearLayout.LayoutParams(1, dp(12)))
         }
+    }
+
+    private companion object {
+        const val PICK_FILES = 7
     }
 }

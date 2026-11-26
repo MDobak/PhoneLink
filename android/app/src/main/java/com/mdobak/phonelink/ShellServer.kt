@@ -3,13 +3,13 @@ package com.mdobak.phonelink
 import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
-import android.media.MediaRecorder
-import android.os.Build
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.media.MediaRecorder
 import android.net.LocalServerSocket
 import android.net.LocalSocket
+import android.os.Build
 import android.os.Bundle
 import android.os.Looper
 import android.os.SystemClock
@@ -20,12 +20,12 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import org.json.JSONArray
-import java.util.concurrent.Executors
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -54,7 +54,7 @@ object ShellServer {
         appPackage = opts["app"]
         Shell.guardThreads()
         try { Looper.prepareMainLooper() } catch (_: Exception) {}
-        // The Mac is gone. A write here can block the exit.
+        // Turn the panel back on when the process ends. No reply: the Mac is gone, and a write can block the exit.
         Runtime.getRuntime().addShutdownHook(Thread { if (screenOff) setScreenPower(true, notify = false) })
         val server = try { LocalServerSocket(opts["socket"] ?: "phonelink-screen") } catch (e: Exception) {
             System.err.println("socket: $e"); exitProcess(2)
@@ -110,8 +110,9 @@ object ShellServer {
                     "resize" -> if (appPackage != null) { appDp = m.optInt("w") to m.optInt("h"); resize = true }
                     "app.launch" -> {
                         val pkg = m.optString("pkg")
+                        val fresh = m.optBoolean("fresh")
                         val id = appVirtualDisplay?.display?.displayId
-                        if (id != null && pkg.matches(Regex("[A-Za-z0-9_.]+"))) inputs.execute { wakeForApp(); launchOn(id, pkg) }
+                        if (id != null && pkg.matches(Regex("[A-Za-z0-9_.]+"))) inputs.execute { wakeForApp(); launchOn(id, pkg, fresh) }
                     }
                     else -> inputs.execute {
                         try {
@@ -184,7 +185,6 @@ object ShellServer {
         return AudioRecord.Builder().setContext(Shell.context).setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
             .setAudioFormat(fmt).setBufferSizeInBytes(max(min * 4, 48_000 * 4 / 5)).build()
     }
-
 
     private val inputs = Executors.newSingleThreadExecutor()
 
@@ -471,7 +471,10 @@ object ShellServer {
             display = if (appPackage != null) appDisplay(w, h, dpi, input) else createMirror(w, h, input)
             codec = c
             c.start()
-            send(1, JSONObject().put("t", "screen.state").put("state", "streaming").put("width", w).put("height", h).toString().toByteArray())
+            val state = JSONObject().put("t", "screen.state").put("state", "streaming").put("width", w).put("height", h)
+            // The width of the phone screen in dp, for the window scale on the Mac.
+            if (appPackage == null) state.put("dpWidth", displaySize().first * 160 / physicalDensity())
+            send(1, state.toString().toByteArray())
             val info = MediaCodec.BufferInfo()
             var buf = ByteArray(256 * 1024)
             val header = ByteArray(9)
@@ -508,7 +511,7 @@ object ShellServer {
     @Volatile private var appDp: Pair<Int, Int>? = null
     @Volatile private var appDisplaySize: Pair<Int, Int>? = null
     @Volatile private var targetDisplay = 0
-    private var appVirtualDisplay: android.hardware.display.VirtualDisplay? = null
+    @Volatile private var appVirtualDisplay: android.hardware.display.VirtualDisplay? = null
 
     private fun defaultDisplayInfo(): Any {
         val g = Class.forName("android.hardware.display.DisplayManagerGlobal").getMethod("getInstance").invoke(null)!!
@@ -530,7 +533,7 @@ object ShellServer {
         appVirtualDisplay?.let { vd ->
             vd.resize(w, h, dpi)
             vd.surface = surface
-            return object : Mirror { override fun release() { vd.surface = null } }
+            return detach(vd)
         }
         // public, presentation, own content, touch, rotates. Not destroy-content: on close the app returns to the phone screen.
         var flags = (1 shl 0) or (1 shl 1) or (1 shl 3) or (1 shl 6) or (1 shl 7)
@@ -556,23 +559,30 @@ object ShellServer {
                 if (home != null) shell("am", "start", "--display", id.toString(), "-n", home)
             }
             sendDisplayId(id)
-            return object : Mirror { override fun release() { vd.surface = null } }
+            return detach(vd)
         }
         val pkg = appPackage!!
         // Send the display id after the app starts (am start -W waits), so intents from the Mac open on top of it.
         thread(isDaemon = true) { launchOn(id, pkg); sendDisplayId(id) }
-        return object : Mirror { override fun release() { vd.surface = null } }
+        return detach(vd)
     }
+
+    // Releasing only detaches the encoder surface. The app display stays for the next encoder.
+    private fun detach(vd: android.hardware.display.VirtualDisplay) = object : Mirror { override fun release() { vd.surface = null } }
 
     private fun sendDisplayId(id: Int) {
         try { send(1, JSONObject().put("t", "display.id").put("id", id).toString().toByteArray()) } catch (_: Exception) {}
     }
 
     // Use the activity name: a package-only start does not resolve on a virtual display.
-    private fun launchOn(id: Int, pkg: String) {
+    // fresh: show the start screen of the app. The first start moves a task of the app to this display.
+    // Clearing the task works only after that: in the same start, Android hides the moved task.
+    private fun launchOn(id: Int, pkg: String, fresh: Boolean = false) {
         val component = launchComponent(pkg)
-        if (component != null) shell("am", "start", "--display", id.toString(), "-W", "-n", component)
-        else shell("monkey", "--display", id.toString(), "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1")
+        if (component != null) {
+            shell("am", "start", "--display", id.toString(), "-W", "-n", component)
+            if (fresh) shell("am", "start", "--display", id.toString(), "-W", "--activity-clear-task", "-n", component)
+        } else shell("monkey", "--display", id.toString(), "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1")
     }
 
     // Skip System UI activities: they are for foldable cover screens.

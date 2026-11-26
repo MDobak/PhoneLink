@@ -25,12 +25,9 @@ class SendActivity : Activity() {
             mac == null -> "Not connected to your Mac."
             uris.isNotEmpty() -> {
                 val sources = Transfers.open(this, uris)
-                when {
-                    sources.isEmpty() -> "Cannot read the shared files."
-                    !Transfers.upload(sources, null) -> "Not connected to your Mac."
-                    sources.size == 1 -> "Sending to " + mac
-                    else -> "Sending " + sources.size + " files to " + mac
-                }
+                if (sources.isEmpty()) "Cannot read the shared files."
+                else Transfers.upload(sources, null)
+                    ?: if (sources.size == 1) "Sending to " + mac else "Sending " + sources.size + " files to " + mac
             }
             !text.isNullOrEmpty() -> {
                 val link = linkIn(text)

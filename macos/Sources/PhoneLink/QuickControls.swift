@@ -15,7 +15,7 @@ enum ControlNeed {
     /// "controls" from the shell helper.
     case debugging
     case appOrDebugging
-    /// Older features (hotspot, Find Phone, Lock Phone) with no "controls" message.
+    /// Hotspot, Find Phone and Lock Phone use their own messages, not "controls".
     case feature
 }
 
@@ -109,11 +109,6 @@ final class ControlPins: ObservableObject {
 
     func remove(_ id: String) {
         ids.removeAll { $0 == id }
-        save()
-    }
-
-    func move(fromOffsets from: IndexSet, toOffset to: Int) {
-        ids.move(fromOffsets: from, toOffset: to)
         save()
     }
 
@@ -229,11 +224,11 @@ final class QuickControls: ObservableObject {
 
     private func live(_ p: PhonePath) -> Bool { p == .app ? appLive : shellLive }
 
-    func side(for id: String) -> PhonePath? {
+    private func side(for id: String) -> PhonePath? {
         sides(.quickControls).first { live($0) && items[$0]?[id] != nil }
     }
 
-    func side(forStream s: VolumeStream) -> PhonePath? {
+    private func side(forStream s: VolumeStream) -> PhonePath? {
         sides(.volume).first { live($0) && volumes[$0]?[s.rawValue] != nil }
     }
 
@@ -359,7 +354,7 @@ final class QuickControls: ObservableObject {
         }
     }
 
-    func set(_ id: String, on: Bool) {
+    private func set(_ id: String, on: Bool) {
         sendSet(id, ["t": "controls.set", "id": id, "on": on], Value(on: on))
     }
 

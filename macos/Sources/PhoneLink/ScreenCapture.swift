@@ -7,7 +7,7 @@ import SwiftUI
 
 enum ScreenCaptureFiles {
     /// The com.apple.screencapture location, or the Desktop.
-    static var folder: URL {
+    private static var folder: URL {
         let fm = FileManager.default
         if let path = UserDefaults(suiteName: "com.apple.screencapture")?.string(forKey: "location") {
             let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
@@ -183,10 +183,6 @@ final class ScreenRecorder: ObservableObject {
 
     private static var now: CMTime { CMClockGetTime(CMClockGetHostTimeClock()) }
 
-    func toggle() {
-        if startedAt == nil { start() } else { stop() }
-    }
-
     /// Main thread. The file starts at the next key frame.
     func start() {
         guard startedAt == nil, PhoneLink.shared.isStreaming else { return }
@@ -213,7 +209,7 @@ final class ScreenRecorder: ObservableObject {
     }
 
     /// Any thread. H.264 Annex B.
-    func video(flags: UInt8, data: Data, format fmt: CMVideoFormatDescription?) {
+    func video(_ data: Data, format fmt: CMVideoFormatDescription?) {
         guard isActive, let fmt else { return }
         let t = Self.now
         q.async { self.appendVideo(data, fmt, t) }
@@ -267,13 +263,8 @@ final class ScreenRecorder: ObservableObject {
         guard let writer, writer.status == .writing, let videoIn, videoIn.isReadyForMoreMediaData else { return }
         var pts = t
         if lastVideo.isValid, pts <= lastVideo { pts = lastVideo + CMTime(value: 1, timescale: 1000) }
-        var avcc = Data()
-        for nal in nals {
-            var len = UInt32(nal.count).bigEndian
-            avcc.append(Data(bytes: &len, count: 4))
-            avcc.append(nal)
-        }
-        guard let sample = Self.sample(avcc, format: fmt, pts: pts, sync: key) else { return }
+        guard let sample = H264Renderer.sample(nals: nals, format: fmt, pts: pts) else { return }
+        if !key { H264Renderer.setFlag(kCMSampleAttachmentKey_NotSync, on: sample) }
         if videoIn.append(sample) { lastVideo = pts }
         else if writer.status == .failed { stopFromQueue("The recording stopped because of an error.") }
     }
@@ -330,26 +321,6 @@ final class ScreenRecorder: ObservableObject {
                                                                    packetDescriptions: nil, sampleBufferOut: &sample) == noErr,
               let sample else { return }
         if audioIn.append(sample) { audioEnd = pts + CMTime(value: CMTimeValue(frames), timescale: 48_000) }
-    }
-
-    private static func sample(_ avcc: Data, format: CMVideoFormatDescription, pts: CMTime, sync: Bool) -> CMSampleBuffer? {
-        var block: CMBlockBuffer?
-        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: avcc.count,
-                                                 blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
-                                                 dataLength: avcc.count, flags: 0, blockBufferOut: &block) == noErr, let block else { return nil }
-        avcc.withUnsafeBytes { _ = CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: avcc.count) }
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
-        var size = avcc.count
-        var sample: CMSampleBuffer?
-        guard CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format, sampleCount: 1,
-                                        sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 1,
-                                        sampleSizeArray: &size, sampleBufferOut: &sample) == noErr, let sample else { return nil }
-        if !sync, let atts = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true), CFArrayGetCount(atts) > 0 {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
-                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-        return sample
     }
 
     /// On q.

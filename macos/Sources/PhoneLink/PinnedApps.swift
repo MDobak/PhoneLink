@@ -106,11 +106,9 @@ final class PinnedApps: ObservableObject {
         generation += 1
         let gen = generation
         AdbAgent.shared.apps(system: true) { [weak self] list in
-            DispatchQueue.main.async {
-                guard let self, gen == self.generation, let list else { return }
-                self.learn(list)
-                self.available = Set(list.filter(\.launchable).map(\.pkg))
-            }
+            guard let self, gen == self.generation, let list else { return }
+            self.learn(list)
+            self.available = Set(list.filter(\.launchable).map(\.pkg))
         }
     }
 
@@ -157,7 +155,7 @@ final class PinnedApps: ObservableObject {
         return true
     }
 
-    static func isPackageName(_ s: String) -> Bool {
+    private static func isPackageName(_ s: String) -> Bool {
         s.range(of: #"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$"#, options: .regularExpression) != nil
     }
 }

@@ -1,11 +1,13 @@
 package com.mdobak.phonelink
 
+import android.app.Activity
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.database.ContentObserver
+import android.database.Cursor
 import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
@@ -25,7 +27,7 @@ object Sms {
     private var thread: HandlerThread? = null
     @Volatile private var lastId = 0L
 
-    fun row(c: android.database.Cursor, ctx: Context) = json(
+    fun row(c: Cursor, ctx: Context) = json(
         "id" to c.getLong(0),
         "thread" to c.getLong(1),
         "address" to (c.getString(2) ?: ""),
@@ -77,8 +79,9 @@ object Sms {
         )
     }
 
-    fun send(ctx: Context, address: String, body: String, done: (Boolean, String?) -> Unit) {
-        val sm = ctx.getSystemService(SmsManager::class.java)
+    /** sim: a subscription id, or -1 for the default SIM. */
+    fun send(ctx: Context, address: String, body: String, sim: Int = -1, done: (Boolean, String?) -> Unit) {
+        val sm = manager(ctx, sim)
         val parts = sm.divideMessage(body)
         val id = register(done)
         val pi = sentIntent(ctx, id)
@@ -99,6 +102,11 @@ object Sms {
         }
     }
 
+    fun manager(ctx: Context, sim: Int): SmsManager {
+        val sm = ctx.getSystemService(SmsManager::class.java)
+        return if (sim >= 0) sm.createForSubscriptionId(sim) else sm
+    }
+
     private fun failure(code: Int) = when (code) {
         SmsManager.RESULT_ERROR_NO_SERVICE -> "The phone has no mobile service."
         SmsManager.RESULT_ERROR_RADIO_OFF -> "The mobile network of the phone is off."
@@ -112,7 +120,7 @@ object Sms {
             val r = object : BroadcastReceiver() {
                 override fun onReceive(c: Context, i: Intent) {
                     val cb = callbacks.remove(i.getIntExtra("id", -1)) ?: return
-                    if (resultCode == android.app.Activity.RESULT_OK) cb(true, null) else cb(false, failure(resultCode))
+                    if (resultCode == Activity.RESULT_OK) cb(true, null) else cb(false, failure(resultCode))
                 }
             }
             ctx.registerReceiver(r, IntentFilter(ACTION_SENT), Context.RECEIVER_NOT_EXPORTED)

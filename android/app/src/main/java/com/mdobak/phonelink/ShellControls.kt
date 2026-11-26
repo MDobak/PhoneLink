@@ -3,7 +3,6 @@ package com.mdobak.phonelink
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.media.AudioManager
-import android.net.Uri
 import android.telephony.SubscriptionManager
 import org.json.JSONObject
 
@@ -28,14 +27,7 @@ object ShellControls {
         }
     }
 
-    private fun setting(table: String, name: String): String? = try {
-        ShellContent.resolver.query(Uri.parse("content://settings/$table"), arrayOf("value"), "name=?", arrayOf(name), null)?.use { c ->
-            if (c.moveToFirst()) c.getString(0) else null
-        }
-    } catch (_: Exception) { null }
-
-
-    private fun bluetoothOn(): Boolean? = setting("global", "bluetooth_on")?.let { it == "1" || it == "2" }
+    private fun bluetoothOn(): Boolean? = Shell.setting("global", "bluetooth_on")?.let { it == "1" || it == "2" }
 
     private val sub: Any by lazy { Shell.asInterface("com.android.internal.telephony.ISub", Shell.service("isub")) }
     private val phone: Any by lazy { Shell.asInterface("com.android.internal.telephony.ITelephony", Shell.service("phone")) }
@@ -44,14 +36,14 @@ object ShellControls {
     private fun dataSub(): Int? {
         if (!has(PackageManager.FEATURE_TELEPHONY_DATA) && !has(PackageManager.FEATURE_TELEPHONY)) return null
         val id = try { Shell.call(sub, "getDefaultDataSubId") as Int }
-            catch (_: Throwable) { setting("global", "multi_sim_data_call")?.toIntOrNull() ?: -1 }
+            catch (_: Throwable) { Shell.setting("global", "multi_sim_data_call")?.toIntOrNull() ?: -1 }
         return id.takeIf { it >= 0 && it != SubscriptionManager.INVALID_SUBSCRIPTION_ID }
     }
 
     private fun dataOn(id: Int): Boolean? =
         try { Shell.call(phone, "isUserDataEnabled", id) as Boolean } catch (e: Throwable) {
             System.err.println("data state: " + (e.cause ?: e).javaClass.name)
-            (setting("global", "mobile_data$id") ?: setting("global", "mobile_data"))?.let { it == "1" }
+            (Shell.setting("global", "mobile_data$id") ?: Shell.setting("global", "mobile_data"))?.let { it == "1" }
         }
 
     private fun powerSaving() = Shell.call(power, "isPowerSaveMode") as Boolean
@@ -64,7 +56,7 @@ object ShellControls {
 
     private fun locationOn() = Shell.call(location, "isLocationEnabledForUser", 0) as Boolean
 
-    private fun rotationOn() = (setting("system", "accelerometer_rotation") ?: "0") == "1"
+    private fun rotationOn() = (Shell.setting("system", "accelerometer_rotation") ?: "0") == "1"
 
     private fun ringer() = Shell.call(audio, "getRingerModeExternal") as Int
 
@@ -97,7 +89,6 @@ object ShellControls {
         }
         return JSONObject().put("t", "controls").put("items", items).put("volume", vol)
     }
-
 
     private fun command(vararg cmd: String) {
         val out = try { ShellData.run(*cmd) } catch (e: Exception) {

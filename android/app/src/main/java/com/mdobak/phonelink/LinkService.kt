@@ -1,10 +1,15 @@
 package com.mdobak.phonelink
 
+import android.Manifest
+import android.app.Activity
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -18,6 +23,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
@@ -28,22 +34,23 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Base64
 import android.util.Log
+import org.json.JSONObject
 import java.io.FileDescriptor
 import java.io.PrintWriter
-import org.json.JSONObject
-import android.util.Base64
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import kotlin.concurrent.thread
 
-const val PORT = 47800
+private const val PORT = 47800
+private const val SERVICE_TYPE = "_phonelink._tcp"
+private const val USB_STATE = "android.hardware.usb.action.USB_STATE"
 
 fun phoneName(ctx: Context): String =
     Settings.Global.getString(ctx.contentResolver, Settings.Global.DEVICE_NAME)?.takeIf { it.isNotBlank() } ?: Build.MODEL
-const val SERVICE_TYPE = "_phonelink._tcp"
 
 /** Foreground service: TCP server, Bonjour advertisement, phone listeners and screen capture. */
 class LinkService : Service() {
@@ -52,13 +59,15 @@ class LinkService : Service() {
     @Volatile private var destroyed = false
     private var nsdListener: NsdManager.RegistrationListener? = null
     private var nsdNetwork: Network? = null
-    /** The "pair" value of the Bonjour TXT record now registered. */
+    /** The "pair" value in the registered Bonjour TXT record. */
     private var nsdPairing = false
     private val pairingEnded = Runnable { pairingChanged() }
     private var wifiLock: WifiManager.WifiLock? = null
     private var multicastLock: WifiManager.MulticastLock? = null
 
     private var projection: MediaProjection? = null
+    /** The service type must include mediaProjection while this is true. */
+    private var projectionGranted = false
     // Set on the main thread, read by the session read thread.
     @Volatile private var streamer: ScreenStreamer? = null
     private var pendingScreen: Triple<Int, Int, Int>? = null
@@ -68,7 +77,7 @@ class LinkService : Service() {
     private var lastBattery = -1 to false
     // Random value from the Mac. adb reads it via dumpsys to find the linked phone.
     @Volatile var adbToken: String? = null
-    private val batteryReceiver = object : android.content.BroadcastReceiver() {
+    private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             val level = batteryLevel(i)
             val plugged = i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
@@ -81,7 +90,8 @@ class LinkService : Service() {
     /** Guarded by usbLock. The phone opens each accessory attach one time only. */
     private var usbUsed = false
     private var usbLink: UsbLink? = null
-    private val usbReceiver = object : android.content.BroadcastReceiver() {
+    /** USB accessory and Bluetooth adapter changes. */
+    private val linkReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             when (i.action) {
                 UsbManager.ACTION_USB_ACCESSORY_DETACHED -> synchronized(usbLock) {
@@ -89,14 +99,12 @@ class LinkService : Service() {
                     usbLink?.close()
                 }
                 // Sticky. Also comes when the phone is locked and Android does not start UsbAccessoryActivity.
-                "android.hardware.usb.action.USB_STATE" ->
+                USB_STATE ->
                     if (i.getBooleanExtra("connected", false) && i.getBooleanExtra("accessory", false)) openAccessory(null, false)
-                android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED -> Bluetooth.refresh(this@LinkService)
+                BluetoothAdapter.ACTION_STATE_CHANGED -> Bluetooth.refresh(this@LinkService)
             }
         }
     }
-    // The service type must include mediaProjection while this is true.
-    private var projectionGranted = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -107,7 +115,7 @@ class LinkService : Service() {
         nm.createNotificationChannel(NotificationChannel("link", "Connection", NotificationManager.IMPORTANCE_LOW))
         nm.createNotificationChannel(NotificationChannel("prompt", "Prompts", NotificationManager.IMPORTANCE_HIGH))
         nm.createNotificationChannel(NotificationChannel("files", "Files", NotificationManager.IMPORTANCE_LOW))
-        goForeground()
+        updateForeground()
         startServer()
         // Android drops multicast while the screen is off unless an app holds this lock. Without it, Bonjour
         // queries go unanswered and the Mac cannot find the phone.
@@ -119,10 +127,10 @@ class LinkService : Service() {
         // After an app update Android can leave the notification listener unbound.
         NotifListener.rebind(this)
         registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        registerReceiver(usbReceiver, IntentFilter().apply {
+        registerReceiver(linkReceiver, IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
-            addAction("android.hardware.usb.action.USB_STATE")
-            addAction(android.bluetooth.BluetoothAdapter.ACTION_STATE_CHANGED)
+            addAction(USB_STATE)
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
         }, RECEIVER_EXPORTED)
     }
 
@@ -179,7 +187,7 @@ class LinkService : Service() {
         Photos.stop(this)
         Calls.stop(this)
         try { unregisterReceiver(batteryReceiver) } catch (_: Exception) {}
-        try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(linkReceiver) } catch (_: Exception) {}
         synchronized(usbLock) { usbLink?.close() }
         Bluetooth.stop()
         PrivateWifi.stop()
@@ -188,7 +196,7 @@ class LinkService : Service() {
         super.onDestroy()
     }
 
-    private fun goForeground() {
+    private fun updateForeground() {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val s = Hub.session
         val text = when {
@@ -204,11 +212,12 @@ class LinkService : Service() {
             .setOngoing(true)
         if (s != null) b.addAction(Notification.Action.Builder(null, "Send clipboard", ClipSendActivity.pending(this)).build())
         val n = b.build()
+        val sharing = projectionGranted || projection != null
         var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-        if (projectionGranted || projection != null) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        if (sharing) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         // Screen sound needs the microphone type. Android refuses it in some states, so try without it then.
-        val mic = (projectionGranted || projection != null) && wantAudio &&
-            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val mic = sharing && wantAudio &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         try {
             startForeground(1, n, if (mic) type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else type)
         } catch (e: Exception) {
@@ -228,20 +237,22 @@ class LinkService : Service() {
         if (Hub.session != null) Hub.send(status())
     }
 
-    fun onSessionChanged() = main.post {
-        val connected = Hub.session != null
-        if (!connected) stopScreen()
-        if (!connected) PrivateWifi.sessionEnded()
-        val wm = applicationContext.getSystemService(WifiManager::class.java)
-        // Low latency works only with the screen on and an app of this phone in front. With the screen off Android
-        // ignores the lock (Android 14+ also ignores the high-performance lock).
-        if (connected && wifiLock == null) {
-            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "phonelink").apply { acquire() }
-        } else if (!connected) {
-            wifiLock?.takeIf { it.isHeld }?.release()
-            wifiLock = null
+    fun onSessionChanged() {
+        main.post {
+            val connected = Hub.session != null
+            // Low latency works only with the screen on and an app of this phone in front. With the screen off
+            // Android ignores the lock (Android 14+ also ignores the high-performance lock).
+            if (connected && wifiLock == null) {
+                val wm = applicationContext.getSystemService(WifiManager::class.java)
+                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "phonelink").apply { acquire() }
+            } else if (!connected) {
+                stopScreen()
+                PrivateWifi.sessionEnded()
+                wifiLock?.takeIf { it.isHeld }?.release()
+                wifiLock = null
+            }
+            updateForeground()
         }
-        goForeground()
     }
 
     private fun startServer() = thread(name = "phonelink-accept") {
@@ -391,49 +402,51 @@ class LinkService : Service() {
             "uplink" to Hotspot.uplink(this),
             "hotspot" to Hotspot.isOn(this),
             "perms" to json(
-                "sms" to (has(android.Manifest.permission.READ_SMS) && has(android.Manifest.permission.SEND_SMS)),
-                "contacts" to has(android.Manifest.permission.READ_CONTACTS),
-                "phone" to (has(android.Manifest.permission.CALL_PHONE) && has(android.Manifest.permission.READ_PHONE_STATE)),
+                "sms" to (has(Manifest.permission.READ_SMS) && has(Manifest.permission.SEND_SMS)),
+                "contacts" to has(Manifest.permission.READ_CONTACTS),
+                "phone" to (has(Manifest.permission.CALL_PHONE) && has(Manifest.permission.READ_PHONE_STATE)),
                 "notifications" to (NotifListener.instance != null),
                 "control" to (InputService.instance != null),
                 "files" to PhoneFiles.hasAccess(),
-                "photos" to has(android.Manifest.permission.READ_MEDIA_IMAGES),
-                "audio" to has(android.Manifest.permission.RECORD_AUDIO),
-                "postNotifications" to (Build.VERSION.SDK_INT < 33 || has(android.Manifest.permission.POST_NOTIFICATIONS)),
-                "callLog" to (has(android.Manifest.permission.READ_CALL_LOG) && has(android.Manifest.permission.ANSWER_PHONE_CALLS)),
+                "photos" to has(Manifest.permission.READ_MEDIA_IMAGES),
+                "audio" to has(Manifest.permission.RECORD_AUDIO),
+                "postNotifications" to (Build.VERSION.SDK_INT < 33 || has(Manifest.permission.POST_NOTIFICATIONS)),
+                "callLog" to (has(Manifest.permission.READ_CALL_LOG) && has(Manifest.permission.ANSWER_PHONE_CALLS)),
                 "background" to ignoringBatteryOptimizations(this),
             ),
         )
     }
 
-    fun startScreen(maxSize: Int, bitrate: Int, fps: Int, sound: Boolean) = main.post {
-        wantAudio = sound
-        streamer?.let {
-            setScreenAudio(sound)
-            it.requestKeyFrame()
-            it.sendInfo()
-            return@post
+    fun startScreen(maxSize: Int, bitrate: Int, fps: Int, sound: Boolean) {
+        main.post {
+            wantAudio = sound
+            streamer?.let {
+                setScreenAudio(sound)
+                it.requestKeyFrame()
+                it.sendInfo()
+                return@post
+            }
+            pendingScreen = Triple(maxSize, bitrate, fps)
+            consentShown = false
+            val mpm = getSystemService(MediaProjectionManager::class.java)
+            val intent = Intent(this, ProjectionActivity::class.java)
+                .putExtra(ProjectionActivity.EXTRA_REQUEST, mpm.createScreenCaptureIntent())
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // A bound accessibility service may start activities from the background; the service context alone
+            // may not. Otherwise ask the user through a notification.
+            val starter: Context = InputService.instance ?: this
+            try {
+                starter.startActivity(intent)
+            } catch (e: Exception) {
+                Log.w("PhoneLink", "cannot start projection activity: $e")
+            }
+            main.postDelayed({
+                if (projection == null && pendingScreen != null) promptForScreen(intent)
+            }, 2500)
         }
-        pendingScreen = Triple(maxSize, bitrate, fps)
-        consentShown = false
-        val mpm = getSystemService(MediaProjectionManager::class.java)
-        val intent = Intent(this, ProjectionActivity::class.java)
-            .putExtra(ProjectionActivity.EXTRA_REQUEST, mpm.createScreenCaptureIntent())
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        // A bound accessibility service may start activities from the background; the service context alone
-        // may not. Otherwise ask the user through a notification.
-        val starter: Context = InputService.instance ?: this
-        try {
-            starter.startActivity(intent)
-        } catch (e: Exception) {
-            Log.w("PhoneLink", "cannot start projection activity: $e")
-        }
-        main.postDelayed({
-            if (projection == null && pendingScreen != null) promptForScreen(intent)
-        }, 2500)
     }
 
-    fun onConsentShown() = main.post { consentShown = true }
+    fun onConsentShown() { main.post { consentShown = true } }
 
     // No answer in 2.5 s: tell the Mac, and notify if the consent screen did not open.
     private fun promptForScreen(intent: Intent) {
@@ -450,39 +463,41 @@ class LinkService : Service() {
         getSystemService(NotificationManager::class.java).notify(2, n)
     }
 
-    fun onProjectionResult(resultCode: Int, data: Intent?) = main.post {
-        getSystemService(NotificationManager::class.java).cancel(2)
-        val params = pendingScreen ?: return@post
-        pendingScreen = null
-        if (resultCode != android.app.Activity.RESULT_OK || data == null) {
-            Hub.send(json("t" to "screen.state", "state" to "stopped", "msg" to "Screen sharing was denied on the phone"))
-            return@post
-        }
-        val mpm = getSystemService(MediaProjectionManager::class.java)
-        // The foreground service must have the mediaProjection type before getMediaProjection().
-        val p = try {
-            projectionGranted = true
-            goForeground()
-            mpm.getMediaProjection(resultCode, data) ?: throw IllegalStateException("No projection")
-        } catch (e: Exception) {
-            Log.w("PhoneLink", "projection failed", e)
-            projectionGranted = false
-            goForeground()
-            Hub.send(json("t" to "screen.state", "state" to "stopped", "msg" to "The phone did not start screen sharing. Try again."))
-            return@post
-        }
-        projection = p
-        p.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() { main.post { stopScreen() } }
-        }, main)
-        try {
-            streamer = ScreenStreamer(this, p, params.first, params.second, params.third).also { it.start() }
-            goForeground()
-            if (wantAudio) startAudio()
-        } catch (e: Exception) {
-            Log.w("PhoneLink", "screen start failed", e)
-            Hub.send(json("t" to "screen.state", "state" to "stopped", "msg" to "Encoder error: ${e.message}"))
-            stopScreen()
+    fun onProjectionResult(resultCode: Int, data: Intent?) {
+        main.post {
+            getSystemService(NotificationManager::class.java).cancel(2)
+            val params = pendingScreen ?: return@post
+            pendingScreen = null
+            if (resultCode != Activity.RESULT_OK || data == null) {
+                Hub.send(json("t" to "screen.state", "state" to "stopped", "msg" to "Screen sharing was denied on the phone"))
+                return@post
+            }
+            val mpm = getSystemService(MediaProjectionManager::class.java)
+            // The foreground service must have the mediaProjection type before getMediaProjection().
+            val p = try {
+                projectionGranted = true
+                updateForeground()
+                mpm.getMediaProjection(resultCode, data) ?: throw IllegalStateException("No projection")
+            } catch (e: Exception) {
+                Log.w("PhoneLink", "projection failed", e)
+                projectionGranted = false
+                updateForeground()
+                Hub.send(json("t" to "screen.state", "state" to "stopped", "msg" to "The phone did not start screen sharing. Try again."))
+                return@post
+            }
+            projection = p
+            p.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() { main.post { stopScreen() } }
+            }, main)
+            try {
+                streamer = ScreenStreamer(this, p, params.first, params.second, params.third).also { it.start() }
+                updateForeground()
+                if (wantAudio) startAudio()
+            } catch (e: Exception) {
+                Log.w("PhoneLink", "screen start failed", e)
+                Hub.send(json("t" to "screen.state", "state" to "stopped", "msg" to "Encoder error: ${e.message}"))
+                stopScreen()
+            }
         }
     }
 
@@ -498,7 +513,7 @@ class LinkService : Service() {
         projectionGranted = false
         if (had) {
             Hub.send(json("t" to "screen.state", "state" to "stopped"))
-            goForeground()
+            updateForeground()
         }
     }
 
@@ -508,8 +523,8 @@ class LinkService : Service() {
         if (Looper.myLooper() != Looper.getMainLooper()) { main.post { setScreenAudio(on) }; return }
         wantAudio = on
         if (projection == null) return
-        if (on && audio == null) { goForeground(); startAudio() }
-        if (!on && audio != null) { audio?.stop(); audio = null; Hub.send(json("t" to "screen.audio", "on" to false)); goForeground() }
+        if (on && audio == null) { updateForeground(); startAudio() }
+        if (!on && audio != null) { audio?.stop(); audio = null; Hub.send(json("t" to "screen.audio", "on" to false)); updateForeground() }
     }
 
     private fun startAudio() {
@@ -518,30 +533,32 @@ class LinkService : Service() {
         val ok = a.start()
         audio = if (ok) a else null
         Hub.send(json("t" to "screen.audio", "on" to ok,
-            "msg" to if (ok) null else if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+            "msg" to if (ok) null else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
                 "Allow Screen sound in Phone Link on the phone." else "The phone cannot share its sound."))
     }
 
-    fun openUrl(url: String) = main.post {
-        val u = android.net.Uri.parse(url)
-        if (u.scheme != "http" && u.scheme != "https") return@post
-        val i = Intent(Intent.ACTION_VIEW, u).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val pm = getSystemService(PowerManager::class.java)
-        val km = getSystemService(android.app.KeyguardManager::class.java)
-        val starter = InputService.instance
-        if (starter != null && pm.isInteractive && !km.isKeyguardLocked) {
-            try { starter.startActivity(i); return@post } catch (e: Exception) { Log.w("PhoneLink", "cannot open link: ${e.javaClass.simpleName}") }
+    fun openUrl(url: String) {
+        main.post {
+            val u = Uri.parse(url)
+            if (u.scheme != "http" && u.scheme != "https") return@post
+            val i = Intent(Intent.ACTION_VIEW, u).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val pm = getSystemService(PowerManager::class.java)
+            val km = getSystemService(KeyguardManager::class.java)
+            val starter = InputService.instance
+            if (starter != null && pm.isInteractive && !km.isKeyguardLocked) {
+                try { starter.startActivity(i); return@post } catch (e: Exception) { Log.w("PhoneLink", "cannot open link: ${e.javaClass.simpleName}") }
+            }
+            val pi = PendingIntent.getActivity(this, 7, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            val n = Notification.Builder(this, "prompt")
+                .setSmallIcon(R.drawable.ic_notif)
+                .setContentTitle("Link from " + (Hub.session?.macName ?: "Mac"))
+                .setContentText(u.host ?: url)
+                .setStyle(Notification.BigTextStyle().bigText(url))
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .build()
+            getSystemService(NotificationManager::class.java).notify(7, n)
         }
-        val pi = PendingIntent.getActivity(this, 7, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val n = Notification.Builder(this, "prompt")
-            .setSmallIcon(R.drawable.ic_notif)
-            .setContentTitle("Link from " + (Hub.session?.macName ?: "Mac"))
-            .setContentText(u.host ?: url)
-            .setStyle(Notification.BigTextStyle().bigText(url))
-            .setContentIntent(pi)
-            .setAutoCancel(true)
-            .build()
-        getSystemService(NotificationManager::class.java).notify(7, n)
     }
 
     @Suppress("DEPRECATION")
@@ -566,6 +583,6 @@ class LinkService : Service() {
             ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
 
         fun batteryIntent(ctx: Context) =
-            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:" + ctx.packageName))
+            Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))
     }
 }

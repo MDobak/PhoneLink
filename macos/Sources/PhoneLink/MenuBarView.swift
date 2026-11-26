@@ -2,19 +2,23 @@ import SwiftUI
 
 /// The menu bar window. Its layout follows the system menu bar windows (Wi-Fi, Bluetooth, Sound).
 struct MenuBarView: View {
-    @ObservedObject private var drive = PhoneDrive.shared
     @EnvironmentObject private var link: PhoneLink
     @EnvironmentObject private var router: Router
+    /// Not read here. Observed because showsControls depends on the hotspot state.
     @ObservedObject private var agent = AdbAgent.shared
     @ObservedObject private var pins = PinnedApps.shared
     @ObservedObject private var desktop = RemoteDesktopHost.shared
     @ObservedObject private var terminal = RemoteTerminal.shared
     @ObservedObject private var controls = QuickControls.shared
     @ObservedObject private var controlPins = ControlPins.shared
-    @ObservedObject private var hotspot = PhoneHotspot.shared
+    @ObservedObject private var agents = AgentServer.shared
+    @ObservedObject private var agentSettings = AgentSettings.shared
     @AppStorage("menuShowsSound") private var showsSoundSetting = true
     /// Demo only: media to show when the phone sends none.
     var previewMedia: MediaInfo? = nil
+
+    /// An agent is connected and can use some tools.
+    private var agentsCanAct: Bool { agentSettings.enabled && !agentSettings.groups.isEmpty && !agents.clients.isEmpty }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -35,8 +39,13 @@ struct MenuBarView: View {
                     .padding(.vertical, 4)
             }
 
-            if desktop.active || terminal.openTabCount > 0 {
+            if desktop.active || terminal.openTabCount > 0 || agentsCanAct {
                 VStack(alignment: .leading, spacing: 0) {
+                    if agentsCanAct {
+                        RemoteAccessRow(title: agents.active ? "\(agents.lastClient ?? "An Agent") Is Using Your Phone" : "Agents Can Use Your Phone",
+                                        symbol: "sparkles", action: "Stop") { agents.stopAll() }
+                            .help("Turns off all agent tools. To turn them on again, open Settings > Agents.")
+                    }
                     if desktop.active {
                         RemoteAccessRow(title: "Your Phone Is Controlling This Mac", symbol: "rectangle.inset.filled.and.person.filled",
                                         action: "Stop") { desktop.stopFromMac() }
@@ -47,7 +56,6 @@ struct MenuBarView: View {
                     }
                 }
                 .padding(.horizontal, 5)
-                separator
             }
 
             if connected, let m = link.media ?? previewMedia {
@@ -98,13 +106,9 @@ struct MenuBarView: View {
     }
 
     private var connected: Bool { link.state == .connected }
-    /// App windows need USB or Wireless debugging (see PhoneFeature.appWindows).
-    private var hasDebugLink: Bool { link.shows(.appWindows) }
-    private var hotspotRoute: Bool { link.path(for: .hotspot) != nil }
-    private var hotspotJoinable: Bool { hotspotRoute && agent.hotspotOn == true && agent.hotspotName != nil }
-    /// Pinned apps need app windows, so the debugging link. The demo shows them without it.
+    /// Pinned apps open in app windows. The demo shows them without a debugging link.
     private var showsPinnedApps: Bool {
-        connected && (hasDebugLink || PhoneLink.isDemo) && !pins.pkgs.isEmpty
+        connected && (link.shows(.appWindows) || PhoneLink.isDemo) && !pins.pkgs.isEmpty
     }
     private var hasItemRows: Bool {
         if !link.hasPhone { return true }
@@ -232,16 +236,13 @@ private struct IconRow: View {
     let title: String
     let symbol: String
     var value: String? = nil
-    var on = false
-    /// Makes VoiceOver read the row as an on/off control.
-    var isToggle = false
     var help: String? = nil
     let action: () -> Void
     @Environment(\.isEnabled) private var enabled
     @Environment(\.colorScheme) private var scheme
 
     /// In light mode a darker gray keeps the white symbol readable.
-    private var offFill: Color { Color(nsColor: scheme == .dark ? .tertiaryLabelColor : .systemGray) }
+    private var fill: Color { Color(nsColor: scheme == .dark ? .tertiaryLabelColor : .systemGray) }
 
     var body: some View {
         Button(action: action) {
@@ -250,7 +251,7 @@ private struct IconRow: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white)
                     .frame(width: 26, height: 26)
-                    .background(Circle().fill(on ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(offFill)))
+                    .background(Circle().fill(fill))
                 Text(title).font(.system(size: 13)).lineLimit(1)
                 Spacer(minLength: 8)
                 if let value {
@@ -264,9 +265,8 @@ private struct IconRow: View {
         .help(help ?? "")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
-        .accessibilityValue(isToggle ? (on ? "On" : "Off") : (value ?? ""))
+        .accessibilityValue(value ?? "")
         .accessibilityAddTraits(.isButton)
-        .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 

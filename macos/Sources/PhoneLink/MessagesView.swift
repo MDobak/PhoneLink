@@ -268,29 +268,13 @@ private struct Bubble: View {
                     if !message.outgoing { Spacer(minLength: 80) }
                 }
             }
-            if !message.body.isEmpty { HStack {
-                if message.outgoing { Spacer(minLength: 80) }
-                Text(message.body)
-                    .foregroundStyle(message.outgoing ? Color.white : Color.primary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: 17, style: .continuous)
-                            .fill(message.outgoing ? Color(nsColor: .systemGreen) : Color(nsColor: .incomingBubble))
-                    )
-                    .opacity(message.pending ? 0.6 : 1)
-                    .help(message.date.formatted(date: .abbreviated, time: .shortened))
-                    // As in Messages: the bubble has a menu with Copy and Delete…, not text selection.
-                    .contextMenu {
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(message.body, forType: .string)
-                        }
-                        Divider()
-                        Button("Delete…", action: onDelete)
-                    }
-                if !message.outgoing { Spacer(minLength: 80) }
-            } }
+            if !message.body.isEmpty {
+                HStack {
+                    if message.outgoing { Spacer(minLength: 80) }
+                    bodyBubble
+                    if !message.outgoing { Spacer(minLength: 80) }
+                }
+            }
             if message.failed {
                 Label("Not Delivered", systemImage: "exclamationmark.circle.fill")
                     .font(.caption)
@@ -299,6 +283,25 @@ private struct Bubble: View {
                 Text("Sending…").font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var bodyBubble: some View {
+        Text(message.body)
+            .foregroundStyle(message.outgoing ? Color.white : Color.primary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .fill(message.outgoing ? Color(nsColor: .systemGreen) : Color(nsColor: .incomingBubble))
+            )
+            .opacity(message.pending ? 0.6 : 1)
+            .help(message.date.formatted(date: .abbreviated, time: .shortened))
+            // As in Messages: the bubble has a menu with Copy and Delete…, not text selection.
+            .contextMenu {
+                Button("Copy") { copyToPasteboard(message.body) }
+                Divider()
+                Button("Delete…", action: onDelete)
+            }
     }
 }
 
@@ -349,12 +352,7 @@ private struct MmsImage: View {
 /// Makes a picture small enough for MMS: JPEG, at most 1600 pixels on the long side.
 enum MmsPicture {
     static func jpeg(from url: URL) -> Data? {
-        guard let img = NSImage(contentsOf: url) else { return nil }
-        return jpeg(from: img)
-    }
-
-    static func jpeg(from img: NSImage) -> Data? {
-        guard let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        guard let img = NSImage(contentsOf: url), let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
         let scale = min(1, 1600 / CGFloat(max(cg.width, cg.height)))
         let w = Int(CGFloat(cg.width) * scale), h = Int(CGFloat(cg.height) * scale)
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -426,8 +424,7 @@ struct ComposeBar: View {
         .background(.bar)
         .dropDestination(for: URL.self) { urls, _ in
             guard let u = urls.first else { return false }
-            attach(u)
-            return picture != nil
+            return attach(u)
         }
         .onAppear {
             if text.isEmpty, let t = initialText { text = t }
@@ -475,11 +472,13 @@ struct ComposeBar: View {
         if p.runModal() == .OK, let u = p.url { attach(u) }
     }
 
-    private func attach(_ u: URL) {
-        guard let d = MmsPicture.jpeg(from: u) else { return }
+    @discardableResult
+    private func attach(_ u: URL) -> Bool {
+        guard let d = MmsPicture.jpeg(from: u) else { return false }
         picture = d
         preview = NSImage(data: d)
         focused = true
+        return true
     }
 
     private func send() {
@@ -497,7 +496,7 @@ struct NewMessageView: View {
     @EnvironmentObject private var router: Router
     @State private var recipients: [Recipient] = []
     @State private var to = ""
-    @State private var body0: String?
+    @State private var initialBody: String?
     @FocusState private var toFocused: Bool
 
     private var suggestions: [Contact] {
@@ -561,7 +560,7 @@ struct NewMessageView: View {
                 Spacer()
             }
             if link.shows(.sendMessages) {
-                ComposeBar(placeholder: all.count > 1 ? "Group Message · MMS" : "Text Message · SMS", initialText: body0) { text, image in
+                ComposeBar(placeholder: all.count > 1 ? "Group Message · MMS" : "Text Message · SMS", initialText: initialBody) { text, image in
                     let a = all
                     if a.count > 1 || image != nil {
                         link.sendMms(to: a, body: text, image: image, thread: nil)
@@ -586,7 +585,7 @@ struct NewMessageView: View {
 
     private func takeRouterInput() {
         if let b = router.composeBody {
-            body0 = b
+            initialBody = b
             router.composeBody = nil
         }
         if let n = router.composeTo {

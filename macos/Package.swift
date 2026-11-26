@@ -10,6 +10,9 @@ let package = Package(
         .target(name: "CPhoneUSB", path: "Sources/CPhoneUSB",
                 linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]),
         // Gives each phone app window its own Dock icon.
-        .executableTarget(name: "PhoneLinkDockShim", path: "Shim")
+        .executableTarget(name: "PhoneLinkDockShim", path: "Shim"),
+        // The MCP server for local agents: stdio to the Unix socket of the app (AgentServer).
+        .executableTarget(name: "PhoneLinkMCP", path: "Sources/PhoneLinkMCP"),
+        .testTarget(name: "PhoneLinkTests", dependencies: ["PhoneLink"], path: "Tests/PhoneLinkTests")
     ]
 )

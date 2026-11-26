@@ -67,7 +67,7 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
         }
     }
 
-    func refreshAccess() {
+    private func refreshAccess() {
         center.getNotificationSettings { [weak self] s in
             guard let self else { return }
             let ok = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional
@@ -264,13 +264,15 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
             case UNNotificationDismissActionIdentifier:
                 if let key { link.dismiss(key) }
             default:
+                let id = response.notification.request.identifier
                 if let path = info["file"] as? String {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
-                } else if response.notification.request.identifier == "call" || info["missed"] != nil { Router.shared.show(.phone, recents: true) }
-                else if response.notification.request.identifier == "battery" { Router.shared.show(nil) }
-                else {
-                    let pkg = info["pkg"] as? String ?? response.notification.request.content.threadIdentifier
-                    self.open(key: key, pkg: pkg)
+                } else if id == "call" || info["missed"] != nil {
+                    Router.shared.show(.phone, recents: true)
+                } else if id == "battery" {
+                    Router.shared.show(nil)
+                } else {
+                    self.open(key: key, pkg: info["pkg"] as? String ?? response.notification.request.content.threadIdentifier)
                 }
             }
             done()

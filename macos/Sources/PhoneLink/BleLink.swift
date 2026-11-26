@@ -41,7 +41,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     private weak var active: BleTransport?
     private var peekUntil = Date.distantPast
     /// The beacon key of the paired phone (from "links"). With a key, the Mac accepts only advertisements with a
-    /// correct tag. Without a key (an older phone app), it accepts all of them.
+    /// correct tag. Without a key (before the first "links" message), it accepts all of them.
     var beaconKey: Data?
     var wantScan = false { didSet { if wantScan != oldValue { update() } } }
     /// Scans for phones with open pairing (the setup window is open).
@@ -128,15 +128,12 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral, advertisementData: [String: Any], rssi: NSNumber) {
         guard let sd = advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data],
-              let d = sd[Ble.service], d.count >= 2 else { return }
+              let d = sd[Ble.service] else { return }
         let b = [UInt8](d)
-        // The first phone app versions sent only the PSM.
-        let legacy = b.count == 2
-        let flags = legacy ? 0 : b[0]
-        let at = legacy ? 0 : 1
-        guard b.count >= at + 2 else { return }
-        let psm = CBL2CAPPSM(b[at]) | CBL2CAPPSM(b[at + 1]) << 8
-        let more = Data(b.dropFirst(at + 2))
+        guard b.count >= 3 else { return }
+        let flags = b[0]
+        let psm = CBL2CAPPSM(b[1]) | CBL2CAPPSM(b[2]) << 8
+        let more = Data(b.dropFirst(3))
         let now = Date()
         if flags & 1 != 0 {
             if wantPairable {
@@ -152,7 +149,7 @@ final class BleCentral: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             guard !others.contains(p.identifier), found == nil || found?.peripheral.identifier == p.identifier else { return }
         } else {
             if pairable.removeValue(forKey: p.identifier) != nil { onPairable?(pairable.map { BlePhone(id: $0.key, name: $0.value.name) }) }
-            if legacy || beaconKey == nil {
+            if beaconKey == nil {
                 guard !others.contains(p.identifier) else { return }
             } else {
                 guard tagIsCorrect(more) else { return }
@@ -300,7 +297,9 @@ final class BleTransport: NSObject, LinkTransport, StreamDelegate {
 
     func cancel() {
         ended = true
+        let dropped = pending
         pending = []
+        dropped.forEach { $0.sent?() }
         if let ch = channel {
             for s in [ch.inputStream as Stream?, ch.outputStream as Stream?] {
                 s?.delegate = nil

@@ -270,11 +270,10 @@ struct FilesDetail: View {
         if let f = hub.items.first(where: { $0.id == id }) { hub.rename(f, to: renameText) }
     }
 
-    private func moveDropped(_ items: [String], into f: RemoteFile) -> Bool {
+    private func moveDropped(_ items: [String], into f: RemoteFile) {
         let paths = RemoteDrag.paths(items)
-        guard f.dir, hub.canModify, !paths.isEmpty else { return false }
+        guard f.dir, hub.canModify, !paths.isEmpty else { return }
         hub.move(paths, into: f.path)
-        return true
     }
 
     // MARK: Content
@@ -340,7 +339,7 @@ struct FilesDetail: View {
             ForEach(sorted) { f in
                 TableRow(f)
                     .draggable(RemoteDrag.prefix + f.path)
-                    .dropDestination(for: String.self) { items in _ = moveDropped(items, into: f) }
+                    .dropDestination(for: String.self) { items in moveDropped(items, into: f) }
             }
         }
         .contextMenu(forSelectionType: RemoteFile.ID.self) { ids in
@@ -412,8 +411,8 @@ struct FileInfoSheet: View {
         .frame(width: 400)
         .task {
             do {
-                let r = try await hub.info(path, deep: true)
-                file = r.0; created = r.created; count = r.count
+                let r = try await hub.info(path)
+                file = r.file; created = r.created; count = r.count
             } catch {
                 self.error = (error as? FileError)?.msg ?? error.localizedDescription
             }

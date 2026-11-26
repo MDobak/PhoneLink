@@ -21,8 +21,6 @@ import java.util.concurrent.atomic.AtomicInteger
 /** Remote Desktop state, H.264 decoding and input messages. The UI is RemoteDesktopActivity. */
 object RemoteDesktop {
     private const val TAG = "RemoteDesktop"
-    const val FLAG_CONFIG = 1
-    const val FLAG_KEY = 2
 
     class Display(val id: Long, val name: String, val width: Int, val height: Int, val main: Boolean)
 
@@ -43,7 +41,6 @@ object RemoteDesktop {
     @Volatile var displays: List<Display> = emptyList(); private set
     @Volatile var cursorX = 0.5f; private set
     @Volatile var cursorY = 0.5f; private set
-    @Volatile var cursorVisible = false; private set
 
     @Volatile var listener: Listener? = null
     private val main = Handler(Looper.getMainLooper())
@@ -70,7 +67,6 @@ object RemoteDesktop {
             "rd.cursor" -> {
                 cursorX = m.optDouble("x", 0.5).toFloat()
                 cursorY = m.optDouble("y", 0.5).toFloat()
-                cursorVisible = m.optBoolean("visible", true)
                 main.post { listener?.onCursor() }
             }
         }
@@ -215,8 +211,8 @@ object RemoteDesktop {
 
         private fun feed(f: Frame) {
             if (needSync.getAndSet(false)) { waitKey = true; announce = true }
-            val config = f.flags and FLAG_CONFIG != 0
-            var key = f.flags and FLAG_KEY != 0
+            val config = f.flags and VIDEO_CONFIG != 0
+            var key = f.flags and VIDEO_KEY != 0
             if (config) {
                 val (s, p, hasIdr) = splitConfig(f.data)
                 if (s != null && p != null && (codec == null || !s.contentEquals(sps) || !p.contentEquals(pps))) {
@@ -363,7 +359,7 @@ object MacKeys {
     const val RETURN = 36; const val TAB = 48; const val SPACE = 49; const val DELETE = 51; const val ESCAPE = 53
     const val FORWARD_DELETE = 117; const val HOME = 115; const val END = 119; const val PAGE_UP = 116; const val PAGE_DOWN = 121
     const val LEFT = 123; const val RIGHT = 124; const val DOWN = 125; const val UP = 126
-    const val COMMAND = 55
+    const val COMMAND = 55; const val SHIFT = 56; const val OPTION = 58; const val CONTROL = 59
     val F = intArrayOf(122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111)   // F1..F12
 
     private val android = SparseIntArray().apply {
@@ -384,10 +380,10 @@ object MacKeys {
         put(KeyEvent.KEYCODE_PAGE_UP, PAGE_UP); put(KeyEvent.KEYCODE_PAGE_DOWN, PAGE_DOWN)
         put(KeyEvent.KEYCODE_DPAD_LEFT, LEFT); put(KeyEvent.KEYCODE_DPAD_RIGHT, RIGHT)
         put(KeyEvent.KEYCODE_DPAD_DOWN, DOWN); put(KeyEvent.KEYCODE_DPAD_UP, UP)
-        put(KeyEvent.KEYCODE_META_LEFT, 55); put(KeyEvent.KEYCODE_META_RIGHT, 54)
-        put(KeyEvent.KEYCODE_SHIFT_LEFT, 56); put(KeyEvent.KEYCODE_SHIFT_RIGHT, 60)
-        put(KeyEvent.KEYCODE_ALT_LEFT, 58); put(KeyEvent.KEYCODE_ALT_RIGHT, 61)
-        put(KeyEvent.KEYCODE_CTRL_LEFT, 59); put(KeyEvent.KEYCODE_CTRL_RIGHT, 62)
+        put(KeyEvent.KEYCODE_META_LEFT, COMMAND); put(KeyEvent.KEYCODE_META_RIGHT, 54)
+        put(KeyEvent.KEYCODE_SHIFT_LEFT, SHIFT); put(KeyEvent.KEYCODE_SHIFT_RIGHT, 60)
+        put(KeyEvent.KEYCODE_ALT_LEFT, OPTION); put(KeyEvent.KEYCODE_ALT_RIGHT, 61)
+        put(KeyEvent.KEYCODE_CTRL_LEFT, CONTROL); put(KeyEvent.KEYCODE_CTRL_RIGHT, 62)
         put(KeyEvent.KEYCODE_CAPS_LOCK, 57); put(KeyEvent.KEYCODE_FUNCTION, 63)
         put(KeyEvent.KEYCODE_NUMPAD_DOT, 65); put(KeyEvent.KEYCODE_NUMPAD_MULTIPLY, 67); put(KeyEvent.KEYCODE_NUMPAD_ADD, 69)
         put(KeyEvent.KEYCODE_NUMPAD_SUBTRACT, 78); put(KeyEvent.KEYCODE_NUMPAD_DIVIDE, 75); put(KeyEvent.KEYCODE_NUMPAD_ENTER, 76)

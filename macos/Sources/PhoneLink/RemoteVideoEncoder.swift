@@ -81,7 +81,7 @@ final class RemoteVideoEncoder {
     }
 
     /// The config unit before a key frame, then the frame.
-    static func units(from sb: CMSampleBuffer) -> [Unit]? {
+    private static func units(from sb: CMSampleBuffer) -> [Unit]? {
         guard CMSampleBufferDataIsReady(sb), let block = CMSampleBufferGetDataBuffer(sb) else { return nil }
         let pts = CMSampleBufferGetPresentationTimeStamp(sb)
         let us = pts.isValid ? UInt64(max(0, CMTimeGetSeconds(pts) * 1_000_000)) : 0
@@ -121,7 +121,7 @@ final class RemoteVideoEncoder {
     }
 
     /// AVCC (length-prefixed) to Annex B (start codes). Nil if the data is bad.
-    static func annexB(fromAVCC d: Data, lengthSize: Int) -> Data? {
+    private static func annexB(fromAVCC d: Data, lengthSize: Int) -> Data? {
         guard (1...4).contains(lengthSize) else { return nil }
         var out = Data(capacity: d.count + 16)
         var ok = true

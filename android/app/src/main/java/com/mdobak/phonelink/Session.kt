@@ -40,7 +40,8 @@ class Session(private val svc: LinkService, private val link: Link) {
     private lateinit var tx: FrameCipher
     private lateinit var rx: FrameCipher
 
-    private class Out(val data: ByteArray, val video: Boolean, val file: Boolean = false, val audio: Boolean = false)
+    /** counter: the queued byte count that this frame adds to. */
+    private class Out(val data: ByteArray, val counter: AtomicLong? = null)
     private val queue = LinkedBlockingQueue<Out>()
     private val queuedVideo = AtomicLong()
     private val queuedFile = AtomicLong()
@@ -179,7 +180,7 @@ class Session(private val svc: LinkService, private val link: Link) {
         val d = ByteArray(b.size + 1)
         d[0] = MSG_JSON
         System.arraycopy(b, 0, d, 1, b.size)
-        queue.add(Out(d, false))
+        queue.add(Out(d))
     }
 
     // When the network falls behind, drop delta frames until the next key frame.
@@ -202,8 +203,7 @@ class Session(private val svc: LinkService, private val link: Link) {
         var p = ptsUs
         for (i in 9 downTo 2) { d[i] = (p and 0xff).toByte(); p = p shr 8 }
         System.arraycopy(data, off, d, 10, len)
-        queuedVideo.addAndGet(d.size.toLong())
-        queue.add(Out(d, true))
+        enqueue(d, queuedVideo)
     }
 
     // Drops audio when over ~300 ms is queued, to keep latency low.
@@ -212,17 +212,12 @@ class Session(private val svc: LinkService, private val link: Link) {
         val d = ByteArray(len + 1)
         d[0] = MSG_AUDIO
         System.arraycopy(data, 0, d, 1, len)
-        queuedAudio.addAndGet(d.size.toLong())
-        queue.add(Out(d, false, false, true))
+        enqueue(d, queuedAudio)
     }
 
     fun sendTerminal(id: Int, data: ByteArray, off: Int = 0, len: Int = data.size) {
         if (closed) return
-        val d = ByteArray(len + 5)
-        d[0] = MSG_TERM
-        d[1] = (id ushr 24).toByte(); d[2] = (id ushr 16).toByte(); d[3] = (id ushr 8).toByte(); d[4] = id.toByte()
-        System.arraycopy(data, off, d, 5, len)
-        queue.add(Out(d, false))
+        queue.add(Out(idFrame(MSG_TERM, id, data, off, len)))
     }
 
     // Blocks while more than 4 MB of file data is queued.
@@ -231,13 +226,26 @@ class Session(private val svc: LinkService, private val link: Link) {
             while (!closed && queuedFile.get() > 4 shl 20) fileLock.wait(200)
         }
         if (closed) throw java.io.IOException("The Mac disconnected.")
-        val d = ByteArray(len + 5)
-        d[0] = MSG_FILE
-        d[1] = (id ushr 24).toByte(); d[2] = (id ushr 16).toByte(); d[3] = (id ushr 8).toByte(); d[4] = id.toByte()
-        System.arraycopy(data, 0, d, 5, len)
-        queuedFile.addAndGet(d.size.toLong())
-        queue.add(Out(d, false, true))
+        enqueue(idFrame(MSG_FILE, id, data, 0, len), queuedFile)
     }
+
+    private fun enqueue(d: ByteArray, counter: AtomicLong) {
+        counter.addAndGet(d.size.toLong())
+        queue.add(Out(d, counter))
+    }
+
+    /** [type][id u32 BE][data] */
+    private fun idFrame(type: Byte, id: Int, data: ByteArray, off: Int, len: Int): ByteArray {
+        val d = ByteArray(len + 5)
+        d[0] = type
+        d[1] = (id ushr 24).toByte(); d[2] = (id ushr 16).toByte(); d[3] = (id ushr 8).toByte(); d[4] = id.toByte()
+        System.arraycopy(data, off, d, 5, len)
+        return d
+    }
+
+    private fun frameId(f: ByteArray): Int =
+        ((f[1].toInt() and 0xff) shl 24) or ((f[2].toInt() and 0xff) shl 16) or
+            ((f[3].toInt() and 0xff) shl 8) or (f[4].toInt() and 0xff)
 
     private fun writeLoop() {
         try {
@@ -246,12 +254,8 @@ class Session(private val svc: LinkService, private val link: Link) {
                 val c = tx.seal(o.data)
                 output.writeInt(c.size)
                 output.write(c)
-                if (o.video) queuedVideo.addAndGet(-o.data.size.toLong())
-                if (o.audio) queuedAudio.addAndGet(-o.data.size.toLong())
-                if (o.file) {
-                    queuedFile.addAndGet(-o.data.size.toLong())
-                    synchronized(fileLock) { fileLock.notifyAll() }
-                }
+                o.counter?.addAndGet(-o.data.size.toLong())
+                if (o.counter === queuedFile) synchronized(fileLock) { fileLock.notifyAll() }
                 if (queue.isEmpty()) output.flush()
             }
         } catch (e: Exception) {
@@ -264,9 +268,7 @@ class Session(private val svc: LinkService, private val link: Link) {
         while (!closed) {
             val f = rx.open(readFrame())
             if (f.size > 5 && f[0] == MSG_FILE) {
-                val id = ((f[1].toInt() and 0xff) shl 24) or ((f[2].toInt() and 0xff) shl 16) or
-                    ((f[3].toInt() and 0xff) shl 8) or (f[4].toInt() and 0xff)
-                Transfers.onChunk(this, id, f, 5, f.size - 5)
+                Transfers.onChunk(this, frameId(f), f, 5, f.size - 5)
                 continue
             }
             if (f.size > 10 && f[0] == MSG_RD_VIDEO) {
@@ -276,9 +278,7 @@ class Session(private val svc: LinkService, private val link: Link) {
                 continue
             }
             if (f.size >= 5 && f[0] == MSG_TERM) {
-                val id = ((f[1].toInt() and 0xff) shl 24) or ((f[2].toInt() and 0xff) shl 16) or
-                    ((f[3].toInt() and 0xff) shl 8) or (f[4].toInt() and 0xff)
-                TerminalHub.onOutput(id, f, 5, f.size - 5)
+                TerminalHub.onOutput(frameId(f), f, 5, f.size - 5)
                 continue
             }
             if (f.isEmpty() || f[0] != MSG_JSON) continue
@@ -318,6 +318,9 @@ class Session(private val svc: LinkService, private val link: Link) {
         if (type.startsWith("term.")) { TerminalHub.handle(m); return }
         when (type) {
             "ping" -> send(json("t" to "pong"))
+            "agent" -> Agent.handle(svc, this, m)
+            "agent.presence" -> AgentSign.update(svc, m.optBoolean("on"), m.optString("client"))
+            "agent.config" -> NotifHistory.setOn(svc, m.optBoolean("history"))
             "status" -> send(svc.status())
             "lohs.start" -> PrivateWifi.start(svc) { send(it) }
             "lohs.stop" -> PrivateWifi.stop()
@@ -410,6 +413,7 @@ class Session(private val svc: LinkService, private val link: Link) {
         if (wasCurrent) {
             RemoteDesktop.linkClosed()
             TerminalHub.linkClosed()
+            AgentSign.hide(svc)
             Transfers.sessionClosed()
             svc.adbToken = null
             svc.onSessionChanged()

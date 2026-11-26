@@ -207,9 +207,37 @@ enum ScreenQuality: String, CaseIterable, Identifiable {
     var bitrate: Int { switch self { case .standard: 4_000_000; case .high: 8_000_000; case .maximum: 16_000_000 } }
 }
 
+/// A JSON file in "Application Support/Phone Link" that only this user can read.
+struct SecretFile {
+    let name: String
+
+    private var dir: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Phone Link", isDirectory: true)
+    }
+    private var url: URL { dir.appendingPathComponent(name) }
+
+    func load<T: Decodable>(_ type: T.Type) -> T? {
+        guard let d = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(type, from: d)
+    }
+
+    /// nil removes the file.
+    func save<T: Encodable>(_ value: T?) {
+        guard let value, let d = try? JSONEncoder().encode(value) else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        try? d.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+}
+
 struct Discovered: Identifiable, Hashable {
     var id: String { name }
     let name: String
-    /// True while pairing is open on the phone. Old phone apps do not send the "pair" value, so they are always true.
+    /// True while pairing is open on the phone. A phone that sends no "pair" value counts as open.
     var pairable = true
 }

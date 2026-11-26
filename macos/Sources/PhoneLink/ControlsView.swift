@@ -264,7 +264,7 @@ struct VolumeSlider: View {
         let span = Double(max(v.max - v.min, 1))
         let f = (value - Double(v.min)) / span
         switch stream {
-        case .media, .call where label == nil:
+        case .media where label == nil, .call where label == nil:
             if f <= 0 { return "speaker.slash.fill" }
             return f < 0.34 ? "speaker.wave.1.fill" : f < 0.67 ? "speaker.wave.2.fill" : "speaker.wave.3.fill"
         case .call: return "phone.fill"

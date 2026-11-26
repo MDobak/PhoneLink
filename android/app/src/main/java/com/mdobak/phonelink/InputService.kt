@@ -2,18 +2,29 @@ package com.mdobak.phonelink
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ComponentName
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Path
+import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.Log
+import android.util.Base64
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Display
-import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** Remote control via accessibility. Coordinates from the Mac are 0..1 of the screen. */
 class InputService : AccessibilityService() {
@@ -22,18 +33,24 @@ class InputService : AccessibilityService() {
         fun require(): InputService = instance ?: throw IllegalStateException("Screen control is off. On the phone, turn on Phone Link screen control in Accessibility settings.")
     }
 
-    override fun onServiceConnected() { instance = this; Hub.changed() }
-    override fun onUnbind(intent: android.content.Intent?): Boolean { instance = null; Hub.changed(); return super.onUnbind(intent) }
+    private val main = Handler(Looper.getMainLooper())
+
+    override fun onServiceConnected() { instance = this; Hub.permsChanged() }
+    override fun onUnbind(intent: Intent?): Boolean { instance = null; Hub.permsChanged(); return super.onUnbind(intent) }
     override fun onDestroy() { if (instance === this) instance = null; super.onDestroy() }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) selectionChanged(event)
+        when (event?.eventType) {
+            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED -> selectionChanged(event)
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> windowChanged(event)
+        }
     }
     override fun onInterrupt() {}
 
-    @Suppress("DEPRECATION")
-    private fun screen(): Pair<Int, Int> {
+    private fun screen(display: Int = Display.DEFAULT_DISPLAY): Pair<Int, Int> {
         val m = DisplayMetrics()
-        getSystemService(android.hardware.display.DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(m)
+        val d = getSystemService(DisplayManager::class.java).getDisplay(display)
+            ?: throw IllegalStateException("Display $display is closed.")
+        @Suppress("DEPRECATION") d.getRealMetrics(m)
         return m.widthPixels to m.heightPixels
     }
 
@@ -49,19 +66,21 @@ class InputService : AccessibilityService() {
 
     private fun replay(list: List<Triple<Float, Float, Long>>) {
         if (list.isEmpty()) return
+        dispatchGesture(GestureDescription.Builder().addStroke(strokeOf(list)).build(), null, null)
+    }
+
+    /** One stroke through the points, with the time of the last point as its duration. */
+    private fun strokeOf(list: List<Triple<Float, Float, Long>>): GestureDescription.StrokeDescription {
         val first = list[0]
         val path = Path().apply { moveTo(first.first, first.second) }
         for (i in 1 until list.size) path.lineTo(list[i].first, list[i].second)
         if (list.size == 1) path.lineTo(first.first, first.second)
         val duration = (list.last().third - first.third).coerceIn(1, 59_000)
-        val stroke = GestureDescription.StrokeDescription(path, 0, duration)
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+        return GestureDescription.StrokeDescription(path, 0, duration)
     }
 
     // Accessibility services cannot inject single touch events, so a stroke is sent in parts that continue
     // each other (willContinue). A part is sent only after the previous one completes. Main thread only.
-
-    private val main = Handler(Looper.getMainLooper())
 
     private class Live(val start: Long, var x: Float, var y: Float) {
         var stroke: GestureDescription.StrokeDescription? = null
@@ -308,5 +327,261 @@ class InputService : AccessibilityService() {
             "paste" -> n.performAction(AccessibilityNodeInfo.ACTION_PASTE)
             "cut" -> n.performAction(AccessibilityNodeInfo.ACTION_CUT)
         }
+    }
+
+    // Agent tools (Agent.kt): the app in front, the screen as a tree of elements, element actions and screenshots.
+
+    @Volatile var frontClass: String? = null
+        private set
+    @Volatile private var frontPkg: String? = null
+
+    fun frontPackage(): String? = (try { rootInActiveWindow?.packageName?.toString() } catch (_: Exception) { null }) ?: frontPkg
+
+    private fun windowChanged(e: AccessibilityEvent) {
+        val p = e.packageName?.toString() ?: return
+        val c = e.className?.toString() ?: return
+        // Dialogs and views also send this event. Keep only activities.
+        try {
+            packageManager.getActivityInfo(ComponentName(p, c), PackageManager.ComponentInfoFlags.of(0))
+            frontPkg = p
+            frontClass = c
+        } catch (_: Exception) {}
+    }
+
+    private val nodeLock = Any()
+    private var nodes: Map<Int, AccessibilityNodeInfo> = emptyMap()
+
+    /** The elements on the screen. The ids stay valid until the next call. With waitFor, waits until a text shows. */
+    fun agentTree(which: String, waitFor: String, timeoutMs: Long, maxNodes: Int, display: Int): JSONObject {
+        val start = SystemClock.uptimeMillis()
+        val end = start + timeoutMs.coerceIn(0, 120_000)
+        // A new app window on the Mac: the app can need some time to show its controls on the new display.
+        val settle = if (display != Display.DEFAULT_DISPLAY) start + 4000 else 0L
+        while (true) {
+            val (o, map) = tree(which, maxNodes.coerceIn(50, 5000), display)
+            val found = waitFor.isEmpty() || map.values.any { matches(it, waitFor) }
+            val now = SystemClock.uptimeMillis()
+            if (map.isEmpty() && waitFor.isEmpty() && now < settle) { Thread.sleep(300); continue }
+            if (found || now >= end) {
+                synchronized(nodeLock) { nodes = map }
+                if (waitFor.isNotEmpty()) o.put("found", found)
+                return o
+            }
+            Thread.sleep(300)
+        }
+    }
+
+    private fun matches(n: AccessibilityNodeInfo, s: String) =
+        n.text?.toString()?.contains(s, true) == true || n.contentDescription?.toString()?.contains(s, true) == true
+
+    private fun typeName(t: Int) = when (t) {
+        AccessibilityWindowInfo.TYPE_APPLICATION -> "app"
+        AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "keyboard"
+        AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
+        AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> "divider"
+        AccessibilityWindowInfo.TYPE_MAGNIFICATION_OVERLAY -> "magnification"
+        else -> "other"
+    }
+
+    private fun tree(which: String, max: Int, display: Int): Pair<JSONObject, Map<Int, AccessibilityNodeInfo>> {
+        val map = HashMap<Int, AccessibilityNodeInfo>()
+        val (w, h) = screen(display)
+        val out = JSONArray()
+        val budget = intArrayOf(max)
+        // An app window on the Mac has its own virtual display.
+        val list = try {
+            if (display == Display.DEFAULT_DISPLAY) windows.orEmpty() else windowsOnAllDisplays.get(display).orEmpty()
+        } catch (_: Exception) { emptyList() }
+        for (win in list.sortedByDescending { it.layer }) {
+            if (win.type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue
+            if (which == "active" && !win.isActive && win.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val root = win.root ?: continue
+            val kids = JSONArray()
+            walk(root, kids, map, budget, 0)
+            out.put(json("type" to typeName(win.type), "title" to win.title?.toString(), "package" to root.packageName?.toString(),
+                "active" to win.isActive, "elements" to kids))
+        }
+        if (out.length() == 0 && display == Display.DEFAULT_DISPLAY) rootInActiveWindow?.let { root ->
+            val kids = JSONArray()
+            walk(root, kids, map, budget, 0)
+            out.put(json("type" to "app", "package" to root.packageName?.toString(), "active" to true, "elements" to kids))
+        }
+        val o = json("screen" to JSONArray(listOf(w, h)), "windows" to out)
+        if (display == Display.DEFAULT_DISPLAY) o.put("front", frontPackage()) else o.put("display", display)
+        if (budget[0] <= 0) o.put("truncated", true)
+        return o to map
+    }
+
+    private fun walk(n: AccessibilityNodeInfo, out: JSONArray, map: HashMap<Int, AccessibilityNodeInfo>, budget: IntArray, depth: Int) {
+        if (depth > 80 || budget[0] <= 0 || !n.isVisibleToUser) return
+        val text = n.text?.toString()?.takeIf { it.isNotBlank() }
+        val desc = n.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+        val hint = n.hintText?.toString()?.takeIf { it.isNotBlank() }
+        val keep = text != null || desc != null || hint != null ||
+            n.isClickable || n.isLongClickable || n.isEditable || n.isScrollable || n.isCheckable
+        var target = out
+        var o: JSONObject? = null
+        if (keep) {
+            budget[0]--
+            val id = map.size + 1
+            map[id] = n
+            val r = Rect()
+            n.getBoundsInScreen(r)
+            val e = json("id" to id, "class" to (n.className?.toString()?.substringAfterLast('.') ?: "View"),
+                "bounds" to JSONArray(listOf(r.left, r.top, r.right, r.bottom)))
+            if (text != null) e.put("text", if (n.isPassword) "(password)" else text.take(300))
+            if (desc != null) e.put("desc", desc.take(300))
+            if (hint != null && hint != text) e.put("hint", hint.take(100))
+            n.viewIdResourceName?.substringAfter(":id/")?.let { e.put("res", it) }
+            val f = JSONArray()
+            if (n.isClickable) f.put("clickable")
+            if (n.isLongClickable) f.put("long_clickable")
+            if (n.isEditable) f.put("editable")
+            if (n.isScrollable) f.put("scrollable")
+            if (n.isCheckable) f.put(if (n.isChecked) "checked" else "unchecked")
+            if (n.isSelected) f.put("selected")
+            if (n.isFocused) f.put("focused")
+            if (!n.isEnabled) f.put("disabled")
+            if (f.length() > 0) e.put("flags", f)
+            out.put(e)
+            o = e
+            target = JSONArray()
+        }
+        for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it, target, map, budget, depth + 1) }
+        if (o != null && target.length() > 0) o.put("children", target)
+    }
+
+    private fun ancestor(n: AccessibilityNodeInfo, test: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        var c: AccessibilityNodeInfo? = n
+        var d = 0
+        while (c != null && d++ < 25) { if (test(c)) return c; c = c.parent }
+        return null
+    }
+
+    private fun center(n: AccessibilityNodeInfo): Pair<Float, Float> {
+        val r = Rect()
+        n.getBoundsInScreen(r)
+        return r.exactCenterX() to r.exactCenterY()
+    }
+
+    private fun textArgs(t: String) = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, t) }
+
+    private fun nodeAction(n: AccessibilityNodeInfo, action: String, a: JSONObject, display: Int): Boolean = when (action) {
+        "click", "tap" -> ancestor(n) { it.isClickable }?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            ?: center(n).let { (x, y) -> stroke(listOf(Triple(x, y, 0L), Triple(x, y, 60L)), display); true }
+        "long_click", "long_press" -> ancestor(n) { it.isLongClickable }?.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+            ?: center(n).let { (x, y) -> stroke(listOf(Triple(x, y, 0L), Triple(x, y, 800L)), display); true }
+        "focus" -> n.performAction(AccessibilityNodeInfo.ACTION_FOCUS) || n.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
+        "set_text" -> n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, textArgs(a.optString("text")))
+        "clear" -> n.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, textArgs(""))
+        "scroll_forward", "scroll_down" -> ancestor(n) { it.isScrollable }?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ?: false
+        "scroll_backward", "scroll_up" -> ancestor(n) { it.isScrollable }?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) ?: false
+        "select" -> n.performAction(AccessibilityNodeInfo.ACTION_SELECT)
+        "expand" -> n.performAction(AccessibilityNodeInfo.ACTION_EXPAND)
+        "collapse" -> n.performAction(AccessibilityNodeInfo.ACTION_COLLAPSE)
+        "dismiss" -> n.performAction(AccessibilityNodeInfo.ACTION_DISMISS)
+        "copy" -> n.performAction(AccessibilityNodeInfo.ACTION_COPY)
+        "paste" -> n.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+        "cut" -> n.performAction(AccessibilityNodeInfo.ACTION_CUT)
+        "show_on_screen" -> n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+        else -> throw IllegalStateException("Unknown element action \"$action\".")
+    }
+
+    /** Does a gesture in screen pixels and waits until it ends. Not on the main thread. */
+    private fun stroke(list: List<Triple<Float, Float, Long>>, display: Int) {
+        val (w, h) = screen(display)
+        val pts = list.map { Triple(it.first.coerceIn(0f, w - 1f), it.second.coerceIn(0f, h - 1f), it.third) }
+        val l = CountDownLatch(1)
+        var ok = false
+        main.post {
+            live = null
+            val sent = dispatchGesture(GestureDescription.Builder().setDisplayId(display).addStroke(strokeOf(pts)).build(),
+                object : GestureResultCallback() {
+                    override fun onCompleted(d: GestureDescription?) { ok = true; l.countDown() }
+                    override fun onCancelled(d: GestureDescription?) { l.countDown() }
+                }, main)
+            if (!sent) l.countDown()
+        }
+        l.await(pts.last().third + 5000, TimeUnit.MILLISECONDS)
+        if (!ok) throw IllegalStateException("The phone did not do the gesture.")
+    }
+
+    private fun px(a: JSONObject, k: String): Float =
+        if (a.has(k)) a.getDouble(k).toFloat() else throw IllegalStateException("Give \"$k\" in screen pixels.")
+
+    fun agentAct(a: JSONObject): JSONObject {
+        val action = a.getString("action")
+        val display = a.optInt("display", Display.DEFAULT_DISPLAY)
+        fun stroke(list: List<Triple<Float, Float, Long>>) = stroke(list, display)
+        if (a.has("element")) {
+            val id = a.getInt("element")
+            val n = synchronized(nodeLock) { nodes[id] } ?: throw IllegalStateException("No element $id. Read the screen again with screen_read.")
+            if (!n.refresh()) throw IllegalStateException("Element $id is not on the screen now. Read the screen again with screen_read.")
+            if (!nodeAction(n, action, a, display)) throw IllegalStateException("The element did not accept the action \"$action\".")
+            return json("done" to true)
+        }
+        when (action) {
+            "tap" -> { val x = px(a, "x"); val y = px(a, "y"); stroke(listOf(Triple(x, y, 0L), Triple(x, y, 60L))) }
+            "double_tap" -> {
+                val x = px(a, "x"); val y = px(a, "y")
+                stroke(listOf(Triple(x, y, 0L), Triple(x, y, 40L)))
+                Thread.sleep(60)
+                stroke(listOf(Triple(x, y, 0L), Triple(x, y, 40L)))
+            }
+            "long_press" -> { val x = px(a, "x"); val y = px(a, "y"); stroke(listOf(Triple(x, y, 0L), Triple(x, y, a.optLong("duration", 800)))) }
+            "swipe" -> stroke(listOf(Triple(px(a, "x"), px(a, "y"), 0L), Triple(px(a, "x2"), px(a, "y2"), a.optLong("duration", 300).coerceAtLeast(50))))
+            "drag" -> {
+                val x = px(a, "x"); val y = px(a, "y")
+                val hold = 700L
+                stroke(listOf(Triple(x, y, 0L), Triple(x, y, hold), Triple(px(a, "x2"), px(a, "y2"), hold + a.optLong("duration", 800).coerceAtLeast(100))))
+            }
+            "back", "home", "recents", "notifications", "quick_settings", "lock", "power", "screenshot" -> global(action)
+            "key" -> {
+                val k = a.getString("key")
+                if (k != "escape" && focusedInput() == null) throw IllegalStateException("No text field has the focus.")
+                key(k)
+            }
+            "type" -> {
+                if (focusedInput() == null) throw IllegalStateException("No text field has the focus. Tap a text field first.")
+                typeText(a.getString("text"))
+            }
+            else -> throw IllegalStateException("Unknown action \"$action\".")
+        }
+        return json("done" to true)
+    }
+
+    /** Android allows one screenshot each second. */
+    fun agentScreenshot(maxSide: Int, png: Boolean, quality: Int, display: Int): JSONObject {
+        var bmp: Bitmap? = null
+        var err: Int? = null
+        for (attempt in 0..2) {
+            val l = CountDownLatch(1)
+            takeScreenshot(display, mainExecutor, object : TakeScreenshotCallback {
+                override fun onSuccess(r: ScreenshotResult) {
+                    try {
+                        val hb = r.hardwareBuffer
+                        bmp = Bitmap.wrapHardwareBuffer(hb, r.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
+                        hb.close()
+                    } catch (e: Exception) { Log.w("InputService", "screenshot: $e") }
+                    l.countDown()
+                }
+                override fun onFailure(code: Int) { err = code; l.countDown() }
+            })
+            l.await(5, TimeUnit.SECONDS)
+            if (bmp != null || err != ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) break
+            err = null
+            Thread.sleep(1100)
+        }
+        val b = bmp ?: throw IllegalStateException(when (err) {
+            ERROR_TAKE_SCREENSHOT_SECURE_WINDOW -> "The app on the screen does not allow screenshots."
+            ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "On the phone, turn Phone Link screen control off and on again in Accessibility settings."
+            else -> "The phone did not take a screenshot."
+        })
+        val s = minOf(1f, maxSide.coerceIn(200, 4000).toFloat() / maxOf(b.width, b.height))
+        val out = if (s < 1f) Bitmap.createScaledBitmap(b, (b.width * s).toInt().coerceAtLeast(1), (b.height * s).toInt().coerceAtLeast(1), true) else b
+        val bytes = ByteArrayOutputStream()
+        out.compress(if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, quality.coerceIn(30, 100), bytes)
+        return json("mime" to if (png) "image/png" else "image/jpeg", "data" to Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP),
+            "width" to out.width, "height" to out.height, "screenWidth" to b.width, "screenHeight" to b.height)
     }
 }

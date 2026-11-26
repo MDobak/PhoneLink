@@ -147,10 +147,10 @@ struct DebugSettings: View {
                           detail: "Connect the phone with a USB cable, or pair it for Wireless debugging.")
                 DisclosureGroup("How to turn on USB debugging") {
                     VStack(alignment: .leading, spacing: 4) {
-                        Step(1, "On the phone, open Settings > About phone > Software information.")
-                        Step(2, "Tap Build number seven times.")
-                        Step(3, "Open Settings > Developer options. Turn on USB debugging.")
-                        Step(4, "Connect the phone to this Mac with a USB cable. Then tap Allow on the phone.")
+                        SetupStep(1, "On the phone, open Settings > About phone > Software information.")
+                        SetupStep(2, "Tap Build number seven times.")
+                        SetupStep(3, "Open Settings > Developer options. Turn on USB debugging.")
+                        SetupStep(4, "Connect the phone to this Mac with a USB cable. Then tap Allow on the phone.")
                     }
                     .padding(.top, 4)
                 }
@@ -380,19 +380,6 @@ private struct StatusRow: View {
     }
 }
 
-private struct Step: View {
-    let n: Int
-    let text: String
-    init(_ n: Int, _ text: String) { self.n = n; self.text = text }
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text("\(n).").monospacedDigit().foregroundStyle(.secondary)
-            Text(text).fixedSize(horizontal: false, vertical: true)
-        }
-    }
-}
-
 // MARK: - Pairing sheets
 
 struct QRPairingSheet: View {
@@ -421,10 +408,10 @@ struct QRPairingSheet: View {
             .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             VStack(alignment: .leading, spacing: 4) {
-                Step(1, "Connect the phone to the same Wi-Fi network as this Mac.")
-                Step(2, "On the phone, open Settings > Developer options > Wireless debugging.")
-                Step(3, "Turn on Wireless debugging. Then tap Pair device with QR code.")
-                Step(4, "Scan this code with the phone.")
+                SetupStep(1, "Connect the phone to the same Wi-Fi network as this Mac.")
+                SetupStep(2, "On the phone, open Settings > Developer options > Wireless debugging.")
+                SetupStep(3, "Turn on Wireless debugging. Then tap Pair device with QR code.")
+                SetupStep(4, "Scan this code with the phone.")
             }
             .font(.callout)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -471,9 +458,9 @@ struct CodePairingSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Pair with Pairing Code").font(.headline).frame(maxWidth: .infinity)
             VStack(alignment: .leading, spacing: 4) {
-                Step(1, "On the phone, open Settings > Developer options > Wireless debugging.")
-                Step(2, "Tap Pair device with pairing code.")
-                Step(3, "Type the code that the phone shows.")
+                SetupStep(1, "On the phone, open Settings > Developer options > Wireless debugging.")
+                SetupStep(2, "Tap Pair device with pairing code.")
+                SetupStep(3, "Type the code that the phone shows.")
             }
             .font(.callout)
 

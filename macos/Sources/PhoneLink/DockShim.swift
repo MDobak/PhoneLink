@@ -23,6 +23,8 @@ final class DockShims: NSObject {
     private var entries: [String: Entry] = [:]
     /// Shims stopped on purpose (for a rebuild). Their exit does not close the window.
     private var expectedEnds = Set<String>()
+    /// Closed windows. SwiftUI can keep the view of a closed window alive, and its later updates must not start a shim again.
+    private let closedWindows = NSHashTable<NSWindow>.weakObjects()
     private var enabled = UserDefaults.standard.object(forKey: settingKey) as? Bool ?? true
     private let work = DispatchQueue(label: "dock-shims", qos: .utility)
 
@@ -44,6 +46,11 @@ final class DockShims: NSObject {
 
     func update(pkg: String, window: NSWindow?, label: String?, icon: NSImage?) {
         guard !pkg.isEmpty else { return }
+        if let w = window ?? entries[pkg]?.window, closedWindows.contains(w) {
+            // A window that shows again (SwiftUI can use it again) is open.
+            guard w.isVisible else { return }
+            closedWindows.remove(w)
+        }
         let e = entries[pkg] ?? Entry()
         entries[pkg] = e
         if let window { e.window = window }
@@ -70,7 +77,10 @@ final class DockShims: NSObject {
     }
 
     private func focus(pkg: String) {
-        guard let w = entries[pkg]?.window else { return }
+        guard let w = entries[pkg]?.window, !closedWindows.contains(w) else {
+            closed(pkg: pkg)
+            return
+        }
         if w.isMiniaturized { w.deminiaturize(nil) }
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -127,6 +137,7 @@ final class DockShims: NSObject {
 
     @objc private func onWindowClose(_ n: Notification) {
         guard let w = n.object as? NSWindow, let pkg = entries.first(where: { $0.value.window === w })?.key else { return }
+        closedWindows.add(w)
         closed(pkg: pkg)
     }
 
@@ -185,7 +196,7 @@ final class DockShims: NSObject {
     }
 
     private func launch(_ pkg: String) {
-        guard enabled, let e = entries[pkg], e.window != nil, !e.building, let helper = Self.helperURL else { return }
+        guard enabled, let e = entries[pkg], let w = e.window, !closedWindows.contains(w), !e.building, let helper = Self.helperURL else { return }
         let desk = pkg == AppStream.desktopID
         let label = desk ? "Phone Desktop" : (e.label ?? pkg)
         let source = e.bigIcon ?? e.icon
@@ -228,7 +239,7 @@ final class DockShims: NSObject {
     }
 
     private func open(_ app: URL, pkg: String, fingerprint: String) {
-        guard let e = entries[pkg], e.window != nil else { return }
+        guard let e = entries[pkg], let w = e.window, !closedWindows.contains(w) else { return }
         e.running = fingerprint
         let c = NSWorkspace.OpenConfiguration()
         c.activates = false

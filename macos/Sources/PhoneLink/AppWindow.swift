@@ -270,10 +270,10 @@ struct AppWindowView: View {
                 lookUpApp()
                 if link.adbSerial != nil, !pkg.isEmpty { stream.start() }
             }
-            .onDisappear {
-                visible = false
-                stream.stop()
-                DockShims.shared.closed(pkg: pkg)
+            .onDisappear { closeStream() }
+            // SwiftUI can keep the view of a closed window alive. Stop the stream when the window closes.
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { n in
+                if let w = n.object as? NSWindow, w === window { closeStream() }
             }
             .onChange(of: label) { _, l in stream.label = l; updateDock() }
             .onChange(of: scale) { _, s in
@@ -346,8 +346,14 @@ struct AppWindowView: View {
         }
     }
 
+    private func closeStream() {
+        visible = false
+        stream.stop()
+        DockShims.shared.closed(pkg: pkg)
+    }
+
     private func updateDock() {
-        guard let window, !pkg.isEmpty else { return }
+        guard visible, let window, !pkg.isEmpty else { return }
         DockShims.shared.update(pkg: pkg, window: window, label: label, icon: icon)
     }
 
